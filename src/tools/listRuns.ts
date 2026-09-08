@@ -15,15 +15,7 @@ export async function runListRuns({
   client: CursorClient;
   input: { agentId: string; limit?: number; cursor?: string };
 }): Promise<ToolData> {
-  const response = await client.listRuns(input);
-  return {
-    items: response.items,
-    ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
-    hint:
-      response.nextCursor === undefined
-        ? 'Last page.'
-        : `More results available: call list_runs again with cursor="${response.nextCursor}".`,
-  };
+  return client.listRuns(input);
 }
 
 export function registerListRuns({ server, client }: RegisterToolArgs): void {
@@ -32,7 +24,7 @@ export function registerListRuns({ server, client }: RegisterToolArgs): void {
     {
       title: 'List runs for an agent',
       description:
-        "Lists the runs on one agent (each follow-up prompt creates a run), newest-first, with status and — for terminal runs — durationMs, result text and git branches. Use it to review an agent's history or to find the run id you lost. Returns `items` and `nextCursor` (absent on the last page).",
+        'Returns Cursor\'s complete paginated run-list response from GET /v1/agents/{agentId}/runs. Pass nextCursor back as cursor for another page.',
       inputSchema: listRunsInput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },

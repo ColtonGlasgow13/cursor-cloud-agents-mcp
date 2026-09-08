@@ -13,12 +13,7 @@ export async function runArchiveAgent({
   client: CursorClient;
   input: { agentId: string };
 }): Promise<ToolData> {
-  const result = await client.archiveAgent(input);
-  return {
-    ...result,
-    archived: true,
-    nextSteps: 'Reversible: call unarchive_agent with the same agentId to bring it back.',
-  };
+  return client.archiveAgent(input);
 }
 
 export function registerArchiveAgent({ server, client }: RegisterToolArgs): void {
@@ -27,7 +22,7 @@ export function registerArchiveAgent({ server, client }: RegisterToolArgs): void
     {
       title: 'Archive an agent',
       description:
-        'Archives an agent so it stops appearing in the default agent list and its machine can be released. This is the REVERSIBLE way to clean up — prefer it over delete_agent. Idempotent: re-archiving an already-archived agent succeeds with no change, so you never need to check state first. A follow-up to an archived agent fails until you call unarchive_agent.',
+        'Archives an agent with POST /v1/agents/{agentId}/archive and returns Cursor\'s complete response. An archived agent cannot accept follow-up runs until it is unarchived.',
       inputSchema: archiveAgentInput,
       annotations: {
         readOnlyHint: false,

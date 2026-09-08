@@ -1,12 +1,11 @@
 import { CursorClient, type CursorClientOptions, type FetchLike } from '../../src/client/index.js';
 import { BASE } from './mswServer.js';
 
-/** A client with instant retries and a huge budget, unless a test says otherwise. */
+/** A client with instant retries, unless a test says otherwise. */
 export function makeClient(overrides: Partial<CursorClientOptions> = {}): CursorClient {
   return new CursorClient({
     apiKey: 'crsr_test_key',
     baseUrl: BASE,
-    rateLimitPerMin: 10_000,
     sleep: async () => undefined,
     random: () => 0,
     ...overrides,

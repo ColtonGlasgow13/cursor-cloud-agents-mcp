@@ -24,7 +24,6 @@ Environment:
   CURSOR_API_KEY                 Required for serve/doctor. From https://cursor.com/dashboard/api
   CURSOR_API_BASE                Default https://api.cursor.com
   CURSOR_MCP_LOG_LEVEL           silent|error|warn|info|debug (default warn; stderr only)
-  CURSOR_MCP_RATE_LIMIT_PER_MIN  Client request budget, default 20
 `;
 
 function readFlag(argv: string[], flag: string): string | undefined {
@@ -43,7 +42,6 @@ function buildClient(): CursorClient {
   return new CursorClient({
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
-    rateLimitPerMin: config.rateLimitPerMin,
     logger: createLogger({ level: config.logLevel }),
   });
 }
@@ -54,7 +52,6 @@ async function serve(): Promise<void> {
   const client = new CursorClient({
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
-    rateLimitPerMin: config.rateLimitPerMin,
     logger,
   });
   const server = createServer({ client, logger });

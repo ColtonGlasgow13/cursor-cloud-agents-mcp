@@ -8,7 +8,7 @@ export interface CreateServerOptions {
   client: CursorClient;
   name?: string;
   version?: string;
-  /** Passed to the tools that keep work in flight after returning. */
+  /** Stderr logger available to tool registrations. */
   logger?: Logger;
 }
 
@@ -26,7 +26,7 @@ export function createServer({
     { name, version },
     {
       instructions:
-        'Tools for Cursor Cloud Agents. Launch work with launch_agent (omit `repos` for a cheap no-repo agent), then follow it with wait_for_run, or poll get_run_events passing afterEventId=nextEventId each time. Finish with get_run to read `result` and PR URLs. Continue an existing agent with send_followup rather than launching a new one. The API budget is about 20 requests per minute, so sleep a few seconds between polls, and never call list_repositories in a loop (1 request/minute).',
+        'Tools for the Cursor Cloud Agents REST API v1. Basic endpoint tools return Cursor response objects unchanged. GET requests may retry transient failures up to 3 attempts; writes are never retried. launch_agent awaits agent creation and may require an MCP tool timeout of at least 180 seconds. get_run_events returns one bounded batch with nextEventId for resuming; wait_for_run is an optional 5-second polling helper.',
     },
   );
   registerAllTools({ server, client, logger });

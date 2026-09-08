@@ -24,22 +24,27 @@ pnpm test:integration # SKIPPED unless RUN_INTEGRATION=1 and CURSOR_API_KEY are 
    The contract test runs the server with `CURSOR_MCP_LOG_LEVEL=debug` specifically to catch a leak.
 2. **Never retry POST or DELETE.** Cursor v1 has no idempotency key. A retried
    `POST /v1/agents` launches a second agent; a retried `POST /v1/agents/{id}/runs` queues a second
-   run. Only GETs are retried (429 / 5xx / network, 3 attempts, jittered backoff). The only
-   retry-safe create is a client-supplied `agentId`, which the API answers with `409
-   agent_id_conflict` — `launch_agent` catches that and returns the existing agent.
+   run. Only GETs are retried (429 / 5xx / network, at most 3 attempts, jittered backoff).
+   A Retry-After longer than 30 seconds is surfaced immediately, and write failures retain
+   their native ambiguity.
 3. **Never log or echo the API key.** `redact()` in `src/log.ts` scrubs `crsr_*` and
    `Authorization` values; error messages say "check CURSOR_API_KEY", never the value.
 4. **Code defensively against the beta API.** Response objects are `z.looseObject` and enum-ish
    fields are parsed as plain strings (known values live in const arrays in
-   `src/client/schemas.ts`). Unknown statuses must not throw; they surface as a `warning` field.
+   `src/client/schemas.ts`). If a valid JSON success object drifts beyond the known schema,
+   diagnostics go to stderr and the native object is still returned.
+5. **Keep endpoint tools thin.** Basic tools return the complete native API response without
+   inferred flags, hints, or workflow instructions. `get_run_events` makes one bounded SSE call;
+   `wait_for_run` is the sole optional polling convenience, at a 5-second interval.
 
 ## Layout
 
 - `src/client/**` — the only place HTTP happens (`index.ts`), error mapping (`httpErrors.ts`),
-  typed errors (`errors.ts`), budget (`rateLimiter.ts`), TTL cache, SSE drain (`sse.ts`), schemas.
+  typed errors (`errors.ts`), TTL cache, SSE drain (`sse.ts`), and response schemas.
 - `src/tools/**` — one file per MCP tool, each exporting `<name>Input`, `run<Name>` (pure, easy to
   unit test) and `register<Name>`. `shared.ts` has `toolSuccess`/`toolFailure`/`withErrorHandling`.
-- `src/server.ts` — `createServer({ client })`; `src/cli.ts` — the bin.
+- `src/server.ts` — `createServer({ client })`; `src/cli.ts` — the bin. `launch_agent` awaits
+  Cursor's full POST response, so MCP clients should allow at least 180 seconds for tool calls.
 
 ## Conventions
 

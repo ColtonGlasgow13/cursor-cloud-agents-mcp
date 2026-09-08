@@ -25,14 +25,7 @@ export async function runListAgents({
     prUrl: input.prUrl,
     includeArchived: input.includeArchived,
   });
-  return {
-    items: response.items,
-    ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
-    hint:
-      response.nextCursor === undefined
-        ? 'Last page. List items carry only identity fields — call get_agent for repos/autoCreatePR/etc.'
-        : `More results available: call list_agents again with cursor="${response.nextCursor}".`,
-  };
+  return response;
 }
 
 export function registerListAgents({ server, client }: RegisterToolArgs): void {
@@ -41,7 +34,7 @@ export function registerListAgents({ server, client }: RegisterToolArgs): void {
     {
       title: 'List cloud agents',
       description:
-        'Lists Cursor cloud agents newest-first with their id, name, status, url and latestRunId. Use it to find an agent you launched earlier, to locate the agent behind a PR (pass prUrl), or to check what is still running. Returns `items` and `nextCursor` (absent on the last page). Items contain identity fields ONLY — call get_agent for the full record.',
+        'Returns Cursor\'s complete paginated agent-list response from GET /v1/agents. Supports PR, archive, and pagination filters.',
       inputSchema: listAgentsInput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },

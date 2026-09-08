@@ -33,7 +33,7 @@ describe('retry policy', () => {
     expect(waits).toEqual([2000]);
   });
 
-  it('caps a single Retry-After wait at 30s', async () => {
+  it('surfaces a Retry-After beyond the 30s retry window without another request', async () => {
     let calls = 0;
     const waits: number[] = [];
     mswServer.use(
@@ -49,11 +49,14 @@ describe('retry policy', () => {
       }),
     );
     const client = makeClient({ sleep: async (ms) => void waits.push(ms) });
-    await client.me();
-    expect(waits).toEqual([30_000]);
+    const error = await client.me().catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(RateLimitedError);
+    expect((error as RateLimitedError).retryAfterMs).toBe(600_000);
+    expect(calls).toBe(1);
+    expect(waits).toEqual([]);
   });
 
-  it('reports the full Retry-After to the caller even though a single wait is capped', async () => {
+  it('reports the full Retry-After to the caller', async () => {
     mswServer.use(
       http.post(`${BASE}/v1/agents`, () =>
         HttpResponse.json(errorBody('rate_limit_exceeded', 'slow down'), {

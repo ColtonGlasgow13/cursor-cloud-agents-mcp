@@ -4,9 +4,6 @@ import { withErrorHandling, type RegisterToolArgs, type ToolData } from './share
 
 export const deleteAgentInput = {
   agentId: z.string().min(1).describe('Agent id to delete permanently, e.g. "bc-<uuid>".'),
-  confirm: z
-    .literal(true)
-    .describe('Must be true. Deletion is permanent — the agent, its runs and its workspace are gone.'),
 };
 
 export async function runDeleteAgent({
@@ -14,14 +11,9 @@ export async function runDeleteAgent({
   input,
 }: {
   client: CursorClient;
-  input: { agentId: string; confirm: true };
+  input: { agentId: string };
 }): Promise<ToolData> {
-  const result = await client.deleteAgent({ agentId: input.agentId });
-  return {
-    ...result,
-    deleted: true,
-    nextSteps: 'Permanent. The agent id now returns NotFoundError; its run history and artifacts are unrecoverable.',
-  };
+  return client.deleteAgent(input);
 }
 
 export function registerDeleteAgent({ server, client }: RegisterToolArgs): void {
@@ -30,7 +22,7 @@ export function registerDeleteAgent({ server, client }: RegisterToolArgs): void 
     {
       title: 'Delete an agent permanently',
       description:
-        'Permanently deletes an agent, its run history and its workspace. IRREVERSIBLE — prefer archive_agent unless the user explicitly asked for deletion. Requires confirm:true. Use it to clean up throwaway agents (e.g. a no-repo test agent you just launched).',
+        'Permanently deletes an agent with DELETE /v1/agents/{agentId} and returns Cursor\'s complete response. This removes its run history and workspace and cannot be undone.',
       inputSchema: deleteAgentInput,
       annotations: {
         readOnlyHint: false,

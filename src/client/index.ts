@@ -4,7 +4,6 @@ import { USER_AGENT } from '../version.js';
 import { TtlCache } from './cache.js';
 import { NetworkError, ResponseValidationError } from './errors.js';
 import { mapHttpError, readRequestId, type ErrorContext } from './httpErrors.js';
-import { RateLimiter, type BucketName } from './rateLimiter.js';
 import {
   artifactDownloadResponseSchema,
   agentSchema,
@@ -41,6 +40,10 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export type QueryValue = string | number | boolean | undefined;
 
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted ?? false;
+}
+
 export const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
 export const REPOSITORIES_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
@@ -51,14 +54,12 @@ export interface CursorClientOptions {
   apiKey: string;
   baseUrl: string;
   fetch?: FetchLike;
-  rateLimiter?: RateLimiter;
   cache?: TtlCache<unknown>;
   logger?: Logger;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   /** Injected for deterministic backoff jitter in tests. */
   random?: () => number;
-  rateLimitPerMin?: number;
 }
 
 interface RequestArgs<T> {
@@ -67,8 +68,9 @@ interface RequestArgs<T> {
   query?: Record<string, QueryValue>;
   body?: unknown;
   schema: z.ZodType<T>;
-  bucket?: BucketName;
   context?: ErrorContext;
+  signal?: AbortSignal;
+  deadlineMs?: number;
 }
 
 /**
@@ -82,7 +84,6 @@ export class CursorClient {
   private readonly apiKey: string;
   readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
-  private readonly rateLimiter: RateLimiter;
   private readonly cache: TtlCache<unknown>;
   private readonly logger: Logger;
   private readonly now: () => number;
@@ -97,13 +98,6 @@ export class CursorClient {
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((r) => void setTimeout(r, ms)));
     this.random = options.random ?? Math.random;
     this.logger = options.logger ?? silentLogger;
-    this.rateLimiter =
-      options.rateLimiter ??
-      new RateLimiter({
-        perMinute: options.rateLimitPerMin ?? 20,
-        now: this.now,
-        sleep: this.sleep,
-      });
     this.cache = options.cache ?? new TtlCache<unknown>({ ttlMs: MODELS_CACHE_TTL_MS, now: this.now });
   }
 
@@ -136,9 +130,30 @@ export class CursorClient {
   }
 
   private backoffMs(attempt: number, retryAfterMs: number | undefined): number {
+    if (retryAfterMs !== undefined) return retryAfterMs;
     const exponential = BACKOFF_BASE_MS * 2 ** (attempt - 1);
     const jittered = Math.floor(this.random() * exponential);
-    return Math.min(MAX_BACKOFF_MS, jittered + (retryAfterMs ?? 0));
+    return Math.min(MAX_BACKOFF_MS, jittered);
+  }
+
+  /** Returns false when cancellation wins. The underlying injected sleep may finish later, but sends no request. */
+  private async sleepBeforeRetry(ms: number, signal?: AbortSignal): Promise<boolean> {
+    if (signal === undefined) {
+      await this.sleep(ms);
+      return true;
+    }
+    if (signal.aborted) return false;
+    let removeAbort = (): void => {};
+    const aborted = new Promise<false>((resolve) => {
+      const onAbort = (): void => resolve(false);
+      signal.addEventListener('abort', onAbort, { once: true });
+      removeAbort = () => signal.removeEventListener('abort', onAbort);
+    });
+    try {
+      return await Promise.race([this.sleep(ms).then(() => true as const), aborted]);
+    } finally {
+      removeAbort();
+    }
   }
 
   private async request<T>({
@@ -147,8 +162,9 @@ export class CursorClient {
     query,
     body,
     schema,
-    bucket = 'global',
     context,
+    signal,
+    deadlineMs,
   }: RequestArgs<T>): Promise<T> {
     const url = this.buildUrl(path, query);
     const target = this.logTarget(url);
@@ -157,7 +173,9 @@ export class CursorClient {
 
     for (;;) {
       attempt += 1;
-      await this.rateLimiter.acquire(bucket);
+      if (isAborted(signal) || (deadlineMs !== undefined && this.now() >= deadlineMs)) {
+        throw new NetworkError({ message: `Request was cancelled (${method} ${path}).` });
+      }
       const startedAt = this.now();
 
       let response: Response;
@@ -166,9 +184,10 @@ export class CursorClient {
           method,
           headers: this.headers(body === undefined ? undefined : { 'Content-Type': 'application/json' }),
           body: body === undefined ? undefined : JSON.stringify(body),
+          signal,
         });
       } catch (cause) {
-        const willRetry = canRetry && attempt < MAX_ATTEMPTS;
+        const willRetry = canRetry && attempt < MAX_ATTEMPTS && !isAborted(signal);
         this.logger.debug(
           `${method} ${target} -> network error (${this.now() - startedAt}ms)${willRetry ? ' retrying' : ''}`,
         );
@@ -181,7 +200,9 @@ export class CursorClient {
         });
         if (willRetry) {
           this.logger.warn('retrying after network error', { attempt, method, path });
-          await this.sleep(this.backoffMs(attempt, undefined));
+          const waitMs = this.backoffMs(attempt, undefined);
+          if (deadlineMs !== undefined && waitMs >= deadlineMs - this.now()) throw networkError;
+          if (!(await this.sleepBeforeRetry(waitMs, signal))) throw networkError;
           continue;
         }
         throw networkError;
@@ -189,11 +210,11 @@ export class CursorClient {
 
       const elapsedMs = this.now() - startedAt;
       const retryable = response.status === 429 || response.status >= 500;
-      const willRetry = canRetry && retryable && attempt < MAX_ATTEMPTS;
+      let willRetry = canRetry && retryable && attempt < MAX_ATTEMPTS;
       this.logger.debug(
         `${method} ${target} -> ${response.status} (${elapsedMs}ms)${
           response.status === 429 ? ' rate-limited' : ''
-        }${willRetry ? ' retrying' : ''}`,
+        }`,
       );
 
       if (!response.ok) {
@@ -207,12 +228,14 @@ export class CursorClient {
           nowMs: this.now(),
           context,
         });
+        const retryAfterMs =
+          'retryAfterMs' in error && typeof error.retryAfterMs === 'number'
+            ? error.retryAfterMs
+            : undefined;
+        if (retryAfterMs !== undefined && retryAfterMs > MAX_BACKOFF_MS) willRetry = false;
         if (willRetry) {
-          const retryAfterMs =
-            'retryAfterMs' in error && typeof error.retryAfterMs === 'number'
-              ? error.retryAfterMs
-              : undefined;
           const waitMs = this.backoffMs(attempt, retryAfterMs);
+          if (deadlineMs !== undefined && waitMs >= deadlineMs - this.now()) throw error;
           this.logger.warn('retrying after error response', {
             attempt,
             method,
@@ -220,7 +243,7 @@ export class CursorClient {
             status: response.status,
             waitMs,
           });
-          await this.sleep(waitMs);
+          if (!(await this.sleepBeforeRetry(waitMs, signal))) throw error;
           continue;
         }
         throw error;
@@ -245,8 +268,19 @@ export class CursorClient {
 
       const parsed = schema.safeParse(raw);
       if (!parsed.success) {
+        if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+          this.logger.warn('Cursor API response schema changed; returning native JSON object', {
+            method,
+            path,
+            requestId: readRequestId(response.headers),
+            issues: parsed.error.issues.map(
+              (issue) => `${issue.path.join('.') === '' ? '(root)' : issue.path.join('.')}: ${issue.message}`,
+            ),
+          });
+          return raw as T;
+        }
         throw new ResponseValidationError({
-          message: `Cursor API response for ${method} ${path} did not match the expected schema.`,
+          message: `Cursor API returned a JSON value instead of an object for ${method} ${path}.`,
           status: response.status,
           requestId: readRequestId(response.headers),
           issues: parsed.error.issues.map(
@@ -254,8 +288,6 @@ export class CursorClient {
           ),
           rawBody: raw,
           details: raw,
-          guidance:
-            'The Cursor API is in public beta and its response shape may have changed. The raw body is included above so the mismatch can be reported or the schema relaxed.',
         });
       }
       return parsed.data;
@@ -272,7 +304,7 @@ export class CursorClient {
     const key = 'models';
     if (refresh) this.cache.delete(key);
     const cached = refresh ? undefined : this.cache.get(key);
-    if (cached !== undefined) return listModelsResponseSchema.parse(cached);
+    if (cached !== undefined) return cached as ListModelsResponse;
     const data = await this.request({
       method: 'GET',
       path: '/v1/models',
@@ -282,17 +314,15 @@ export class CursorClient {
     return data;
   }
 
-  /** Strict server-side budget (1/min, 30/hour) — cached for 10 minutes. */
   async listRepositories({ refresh = false }: { refresh?: boolean } = {}): Promise<ListRepositoriesResponse> {
     const key = 'repositories';
     if (refresh) this.cache.delete(key);
     const cached = refresh ? undefined : this.cache.get(key);
-    if (cached !== undefined) return listRepositoriesResponseSchema.parse(cached);
+    if (cached !== undefined) return cached as ListRepositoriesResponse;
     const data = await this.request({
       method: 'GET',
       path: '/v1/repositories',
       schema: listRepositoriesResponseSchema,
-      bucket: 'repositories',
     });
     this.cache.set(key, data);
     return data;
@@ -398,12 +428,24 @@ export class CursorClient {
     });
   }
 
-  getRun({ agentId, runId }: { agentId: string; runId: string }): Promise<Run> {
+  getRun({
+    agentId,
+    runId,
+    signal,
+    deadlineMs,
+  }: {
+    agentId: string;
+    runId: string;
+    signal?: AbortSignal;
+    deadlineMs?: number;
+  }): Promise<Run> {
     return this.request({
       method: 'GET',
       path: `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`,
       schema: runSchema,
       context: { agentId, runId },
+      signal,
+      deadlineMs,
     });
   }
 
@@ -462,7 +504,7 @@ export class CursorClient {
 
   /**
    * Opens the run SSE stream, drains it for at most `maxWaitMs`, then closes it.
-   * Counts as one request against the global budget.
+   * The deadline covers connection, pre-body retries and body drain.
    */
   async streamRunEvents({
     agentId,
@@ -481,18 +523,38 @@ export class CursorClient {
     eventTypes?: string[];
     signal?: AbortSignal;
   }): Promise<StreamRunEventsResult> {
+    if (signal?.aborted === true) {
+      throw new NetworkError({ message: 'Run event stream request was cancelled before it started.' });
+    }
     const path = `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`;
     const url = this.buildUrl(path);
     const target = this.logTarget(url);
     const controller = new AbortController();
+    let deadlineReached = false;
+    const timeout = setTimeout(() => {
+      deadlineReached = true;
+      controller.abort();
+    }, maxWaitMs);
+    const deadline = this.now() + maxWaitMs;
     const abortOuter = (): void => controller.abort();
     signal?.addEventListener('abort', abortOuter, { once: true });
 
     let attempt = 0;
     try {
       for (;;) {
+        if (controller.signal.aborted) {
+          if (deadlineReached) {
+            return {
+              events: [],
+              lastEventId: lastEventId ?? null,
+              statusFromStream: null,
+              retentionSeconds: null,
+              closedByServer: false,
+            };
+          }
+          throw new NetworkError({ message: `Run event stream request was cancelled (${path}).` });
+        }
         attempt += 1;
-        await this.rateLimiter.acquire('global');
 
         const startedAt = this.now();
         let response: Response;
@@ -508,8 +570,30 @@ export class CursorClient {
           });
         } catch (cause) {
           this.logger.debug(`GET ${target} -> network error (${this.now() - startedAt}ms)`);
+          if (deadlineReached) {
+            return {
+              events: [],
+              lastEventId: lastEventId ?? null,
+              statusFromStream: null,
+              retentionSeconds: null,
+              closedByServer: false,
+            };
+          }
           if (attempt < MAX_ATTEMPTS && !controller.signal.aborted) {
-            await this.sleep(this.backoffMs(attempt, undefined));
+            const waitMs = Math.min(this.backoffMs(attempt, undefined), Math.max(0, deadline - this.now()));
+            if (waitMs <= 0) continue;
+            if (!(await this.sleepBeforeRetry(waitMs, controller.signal))) {
+              if (deadlineReached) {
+                return {
+                  events: [],
+                  lastEventId: lastEventId ?? null,
+                  statusFromStream: null,
+                  retentionSeconds: null,
+                  closedByServer: false,
+                };
+              }
+              throw new NetworkError({ message: `Run event stream request was cancelled (${path}).` });
+            }
             continue;
           }
           throw new NetworkError({
@@ -523,7 +607,7 @@ export class CursorClient {
         this.logger.debug(
           `GET ${target} -> ${response.status} (${this.now() - startedAt}ms)${
             response.status === 429 ? ' rate-limited' : ''
-          }${retryableStatus && attempt < MAX_ATTEMPTS ? ' retrying' : ''}`,
+          }`,
         );
 
         if (!response.ok) {
@@ -537,12 +621,24 @@ export class CursorClient {
             nowMs: this.now(),
             context: { agentId, runId },
           });
-          if (retryableStatus && attempt < MAX_ATTEMPTS) {
-            const retryAfterMs =
+          const retryAfterMs =
               'retryAfterMs' in error && typeof error.retryAfterMs === 'number'
                 ? error.retryAfterMs
                 : undefined;
-            await this.sleep(this.backoffMs(attempt, retryAfterMs));
+          const waitMs = this.backoffMs(attempt, retryAfterMs);
+          if (
+            retryableStatus &&
+            attempt < MAX_ATTEMPTS &&
+            waitMs <= MAX_BACKOFF_MS &&
+            waitMs < deadline - this.now()
+          ) {
+            this.logger.warn('retrying run event stream after error response', {
+              attempt,
+              path,
+              status: response.status,
+              waitMs,
+            });
+            if (!(await this.sleepBeforeRetry(waitMs, controller.signal))) throw error;
             continue;
           }
           throw error;
@@ -558,7 +654,6 @@ export class CursorClient {
           return {
             events: [],
             lastEventId: lastEventId ?? null,
-            sawTerminal: false,
             statusFromStream: null,
             retentionSeconds,
             closedByServer: true,
@@ -568,7 +663,7 @@ export class CursorClient {
         // Bytes are flowing: from here on we never retry, we just drain.
         const drained = await drainRunEventStream({
           body: response.body,
-          maxWaitMs,
+          maxWaitMs: Math.max(0, deadline - this.now()),
           maxEvents,
           eventTypes,
           retentionSeconds,
@@ -579,6 +674,7 @@ export class CursorClient {
         return { ...drained, lastEventId: drained.lastEventId ?? lastEventId ?? null };
       }
     } finally {
+      clearTimeout(timeout);
       signal?.removeEventListener('abort', abortOuter);
       // Belt and braces: the drain aborts through `onStop`, but every other way
       // out of this method (an error response, a bodyless 200, a throw) must
@@ -588,5 +684,5 @@ export class CursorClient {
   }
 }
 
-export { createLogger, TtlCache, RateLimiter };
+export { createLogger, TtlCache };
 export type { StreamRunEventsResult };

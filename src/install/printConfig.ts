@@ -52,6 +52,8 @@ export function printConfig({
       return [
         '# Claude Code — run this once (add --scope user to enable it in every project):',
         `claude mcp add ${name} --env CURSOR_API_KEY=${apiKey} -- npx -y ${source}`,
+        '# For slow launches, set this server\'s .mcp.json timeout to 180000 ms',
+        '# or start Claude Code with MCP_TOOL_TIMEOUT=180000.',
         '',
         '# Verify:',
         'claude mcp list',
@@ -70,11 +72,13 @@ export function printConfig({
       return [
         '# Codex CLI — run this once:',
         `codex mcp add ${name} --env CURSOR_API_KEY=${apiKey} -- npx -y ${source}`,
+        '# Then add tool_timeout_sec = 180 to this server in ~/.codex/config.toml.',
         '',
         '# Equivalent ~/.codex/config.toml entry (note: mcp_servers, snake_case):',
         `[mcp_servers.${name}]`,
         'command = "npx"',
         `args = ["-y", "${source}"]`,
+        'tool_timeout_sec = 180',
         '',
         `[mcp_servers.${name}.env]`,
         `CURSOR_API_KEY = "${apiKey}"`,

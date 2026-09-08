@@ -21,7 +21,7 @@ describe.skipIf(!enabled)('cloud agent lifecycle (live API)', () => {
 
   afterAll(async () => {
     if (agentId === undefined) return;
-    await runDeleteAgent({ client, input: { agentId, confirm: true } }).catch(() => undefined);
+    await runDeleteAgent({ client, input: { agentId } }).catch(() => undefined);
   });
 
   it('launches a no-repo agent, polls it to a terminal status and deletes it', async () => {
@@ -33,7 +33,6 @@ describe.skipIf(!enabled)('cloud agent lifecycle (live API)', () => {
       input: {
         prompt: 'Reply with the single word PONG and finish.',
         name: 'mcp integration smoke',
-        launchTimeoutMs: 120_000,
       },
     });
     agentId = String(launched['agentId']);

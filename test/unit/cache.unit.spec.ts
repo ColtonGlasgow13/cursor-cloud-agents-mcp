@@ -62,7 +62,7 @@ describe('cache poisoning', () => {
         return HttpResponse.json(modelsFixture);
       }),
     );
-    const client = makeClient({ rateLimitPerMin: 1000 });
+    const client = makeClient();
 
     await expect(client.listModels()).rejects.toThrow();
     // 3 attempts for the failed GET; the failure left nothing behind.

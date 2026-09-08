@@ -13,12 +13,7 @@ export async function runUnarchiveAgent({
   client: CursorClient;
   input: { agentId: string };
 }): Promise<ToolData> {
-  const result = await client.unarchiveAgent(input);
-  return {
-    ...result,
-    archived: false,
-    nextSteps: 'The agent accepts follow-ups again. Call send_followup to give it work.',
-  };
+  return client.unarchiveAgent(input);
 }
 
 export function registerUnarchiveAgent({ server, client }: RegisterToolArgs): void {
@@ -27,7 +22,7 @@ export function registerUnarchiveAgent({ server, client }: RegisterToolArgs): vo
     {
       title: 'Unarchive an agent',
       description:
-        'Restores an archived agent so it accepts follow-up runs again. Use this after AgentArchivedError from send_followup. Idempotent: unarchiving a live agent succeeds with no change.',
+        'Unarchives an agent with POST /v1/agents/{agentId}/unarchive and returns Cursor\'s complete response. The agent can accept follow-up runs again.',
       inputSchema: unarchiveAgentInput,
       annotations: {
         readOnlyHint: false,

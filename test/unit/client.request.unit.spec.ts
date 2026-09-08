@@ -73,6 +73,19 @@ describe('CursorClient request plumbing', () => {
     const client = makeClient({ baseUrl: `${BASE}///` });
     await expect(client.me()).resolves.toMatchObject({ apiKeyName: 'Production API Key' });
   });
+
+  it('does not refuse requests with a local rate limit', async () => {
+    let calls = 0;
+    mswServer.use(
+      http.get(`${BASE}/v1/me`, () => {
+        calls += 1;
+        return HttpResponse.json(meUserFixture);
+      }),
+    );
+    const client = makeClient();
+    await Promise.all(Array.from({ length: 25 }, () => client.me()));
+    expect(calls).toBe(25);
+  });
 });
 
 describe('CursorClient request logging', () => {
@@ -115,7 +128,7 @@ describe('CursorClient request logging', () => {
     expect(text).not.toContain('hunter2');
   });
 
-  it('notes rate-limited and retrying attempts on the request line', async () => {
+  it('notes rate-limited responses and logs an actual retry separately', async () => {
     let calls = 0;
     mswServer.use(
       http.get(`${BASE}/v1/me`, () => {
@@ -135,7 +148,7 @@ describe('CursorClient request logging', () => {
 
     const requestLines = lines.filter((line) => line.includes(' -> '));
     expect(requestLines[0]).toContain('rate-limited');
-    expect(requestLines[0]).toContain('retrying');
+    expect(lines.some((line) => line.includes('retrying after error response'))).toBe(true);
     expect(requestLines[1]).toMatch(/GET \/v1\/me -> 200 \(\d+ms\)$/m);
   });
 

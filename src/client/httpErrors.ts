@@ -122,7 +122,7 @@ export function mapHttpError({
   if (status === 401 || (status === 403 && (code === 'unauthorized' || code === 'api_key_not_found'))) {
     return new AuthError({
       ...base,
-      message: `Cursor API rejected the API key (HTTP ${status}). Check CURSOR_API_KEY.`,
+      message,
       guidance:
         'Create or rotate a key at https://cursor.com/dashboard/api, set CURSOR_API_KEY in the MCP server config, and restart the client. `cursor-cloud-agents-mcp doctor` verifies a key without touching agents.',
     });
@@ -149,15 +149,12 @@ export function mapHttpError({
   if (status === 404) {
     return new NotFoundError({
       ...base,
-      message: `${message} (looking up ${describe(context)})`,
-      guidance:
-        'Confirm the id with list_agents or list_runs. Agent ids look like `bc-<uuid>`, run ids like `run-<uuid>`. A deleted agent stays 404 forever.',
+      message,
+      guidance: `Confirm the id for ${describe(context)} with list_agents or list_runs. Agent ids look like \`bc-<uuid>\` and run ids like \`run-<uuid>\`.`,
     });
   }
 
-  // `agent_id_conflict` is a 409 per the OpenAPI spec, but Cursor's prose docs
-  // have also described it as a 400. Key off the code as well as the status so
-  // launch_agent's "same agentId is safe to retry" promise holds either way.
+  // Cursor documentation has described agent_id_conflict as both 400 and 409.
   if (status === 409 || code === 'agent_id_conflict') {
     if (code === 'agent_busy') {
       const agentId = context.agentId;
@@ -185,8 +182,7 @@ export function mapHttpError({
         ...base,
         message,
         agentId: context.agentId,
-        guidance:
-          'An agent with that agentId already exists — the create was NOT duplicated. Call get_agent with the same agentId to read it.',
+        guidance: 'An agent with that agentId already exists. Use get_agent to read it.',
       });
     }
     if (code === 'run_not_cancellable') {
@@ -228,7 +224,7 @@ export function mapHttpError({
       },
       guidance:
         method === 'GET'
-          ? `Rate limited by Cursor. Automatic retries were exhausted; wait ${seconds ?? 30}s and call again.`
+          ? `Rate limited by Cursor. Retry after ${seconds ?? 30}s. GET retries occur only when the required delay fits within the 30-second retry window.`
           : `Rate limited by Cursor. This was a write request, so it was NOT retried automatically (a blind retry could launch a duplicate agent or run). Wait ${seconds ?? 30}s and decide explicitly whether to resend.`,
     });
   }
@@ -239,7 +235,7 @@ export function mapHttpError({
       message,
       guidance:
         method === 'GET'
-          ? 'Cursor returned a server error; this GET was already retried up to 3 times. Wait a few seconds and try again.'
+          ? 'Cursor returned a server error. GET requests are retried up to 3 attempts when the retry fits the request deadline.'
           : 'Cursor returned a server error. Write requests are never retried automatically — the agent or run MAY still have been created. Call list_agents / list_runs to check before resending.',
     });
   }

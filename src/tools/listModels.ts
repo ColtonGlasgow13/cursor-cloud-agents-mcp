@@ -13,11 +13,7 @@ export async function runListModels({
   client: CursorClient;
   input: { refresh?: boolean };
 }): Promise<ToolData> {
-  const response = await client.listModels({ refresh: input.refresh ?? false });
-  return {
-    items: response.items,
-    hint: 'Pass one of these `id` values as `model` to launch_agent. Omit `model` entirely to use the account default (user default, then team default, then system default).',
-  };
+  return client.listModels({ refresh: input.refresh ?? false });
 }
 
 export function registerListModels({ server, client }: RegisterToolArgs): void {
@@ -26,7 +22,7 @@ export function registerListModels({ server, client }: RegisterToolArgs): void {
     {
       title: 'List available models',
       description:
-        'Lists the models this API key may pass to launch_agent, with their ids, display names, and any tunable parameters/variants (e.g. {"id":"thinking","value":"high"}). Use it before launch_agent when the user names a model, or after an invalid_model error. Results are cached for 10 minutes; pass refresh:true to bypass.',
+        'Returns Cursor\'s complete model-list response from GET /v1/models. Results are cached for 10 minutes; pass refresh:true to bypass the cache.',
       inputSchema: listModelsInput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },

@@ -14,12 +14,7 @@ export async function runGetUsage({
   client: CursorClient;
   input: { agentId: string; runId?: string };
 }): Promise<ToolData> {
-  const usage = await client.getUsage(input);
-  return {
-    agentId: input.agentId,
-    ...usage,
-    hint: 'Token counts match the team usage events endpoint. Runs with no recorded usage yet report zeros.',
-  };
+  return client.getUsage(input);
 }
 
 export function registerGetUsage({ server, client }: RegisterToolArgs): void {
@@ -28,7 +23,7 @@ export function registerGetUsage({ server, client }: RegisterToolArgs): void {
     {
       title: 'Get token usage for an agent',
       description:
-        'Reports token usage (input/output/cache-read/cache-write/total) for an agent, optionally scoped to one run. Use it to answer "how much did that cost" after a run finishes.\n\nThis endpoint is EARLY ACCESS: accounts without it get FeatureUnavailableError (HTTP 403 feature_unavailable). That is not a bug and retrying will not help — report that usage data is unavailable and move on.',
+        'Returns Cursor\'s complete usage response from GET /v1/agents/{agentId}/usage, optionally scoped to one run. Accounts without the early-access endpoint receive Cursor\'s feature_unavailable error.',
       inputSchema: getUsageInput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },

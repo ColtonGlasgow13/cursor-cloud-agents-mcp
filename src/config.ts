@@ -1,13 +1,11 @@
 import { isLogLevel, type LogLevel } from './log.js';
 
 export const DEFAULT_BASE_URL = 'https://api.cursor.com';
-export const DEFAULT_RATE_LIMIT_PER_MIN = 20;
 
 export interface Config {
   apiKey: string;
   baseUrl: string;
   logLevel: LogLevel;
-  rateLimitPerMin: number;
 }
 
 export class ConfigError extends Error {
@@ -18,15 +16,6 @@ export class ConfigError extends Error {
 }
 
 export type EnvLike = Record<string, string | undefined>;
-
-function parsePositiveInt(raw: string | undefined, fallback: number, varName: string): number {
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new ConfigError(`${varName} must be a positive integer (got ${JSON.stringify(raw)}).`);
-  }
-  return value;
-}
 
 /**
  * Reads configuration from the environment.
@@ -59,10 +48,5 @@ export function loadConfig(env: EnvLike): Config {
     apiKey,
     baseUrl,
     logLevel: rawLevel,
-    rateLimitPerMin: parsePositiveInt(
-      env['CURSOR_MCP_RATE_LIMIT_PER_MIN'],
-      DEFAULT_RATE_LIMIT_PER_MIN,
-      'CURSOR_MCP_RATE_LIMIT_PER_MIN',
-    ),
   };
 }

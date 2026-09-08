@@ -63,8 +63,8 @@ describe('stdio MCP server contract', () => {
 
     const deleteAgent = byName.get('delete_agent');
     expect(deleteAgent?.inputSchema.type).toBe('object');
-    expect(Object.keys(deleteAgent?.inputSchema.properties ?? {}).sort()).toEqual(['agentId', 'confirm']);
-    expect(deleteAgent?.inputSchema.required).toContain('confirm');
+    expect(Object.keys(deleteAgent?.inputSchema.properties ?? {})).toEqual(['agentId']);
+    expect(deleteAgent?.inputSchema.required).toEqual(['agentId']);
 
     const launch = byName.get('launch_agent');
     const launchProps = launch?.inputSchema.properties as Record<string, unknown> | undefined;
@@ -83,24 +83,23 @@ describe('stdio MCP server contract', () => {
     expect(result.structuredContent).toMatchObject({
       apiKeyName: 'Production API Key',
       userEmail: 'developer@example.com',
-      keyScope: 'user',
     });
     const [content] = result.content as { type: string; text: string }[];
     expect(content?.type).toBe('text');
     expect(JSON.parse(content?.text ?? '{}')).toMatchObject({ userId: 42 });
   });
 
-  it('returns a run snapshot with derived fields', async () => {
+  it('returns the native run snapshot without derived fields', async () => {
     const result = await client.callTool({
       name: 'get_run',
       arguments: { agentId: CONTRACT_AGENT_ID, runId: CONTRACT_RUN_ID },
     });
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({
-      isTerminal: true,
-      prUrls: ['https://github.com/your-org/your-repo/pull/123'],
-      suggestedPollDelayMs: 0,
+      id: CONTRACT_RUN_ID,
+      status: 'FINISHED',
     });
+    expect(result.structuredContent).not.toHaveProperty('isTerminal');
   });
 
   it('turns an unknown run id into an isError result naming NotFoundError', async () => {
@@ -113,14 +112,20 @@ describe('stdio MCP server contract', () => {
     expect(content?.text).toContain('NotFoundError');
     expect(content?.text).toContain('run-does-not-exist');
     expect(content?.text).toContain('list_runs');
+    expect(result.structuredContent).toMatchObject({
+      error: { name: 'NotFoundError', status: 404, code: 'run_not_found' },
+    });
   });
 
-  it('rejects delete_agent without confirm at the protocol level', async () => {
+  it('accepts delete_agent with agentId alone at the protocol level', async () => {
     const result = await client.callTool({
       name: 'delete_agent',
       arguments: { agentId: CONTRACT_AGENT_ID },
     });
+    // The fake API does not implement deletion, so reaching it produces its native 404,
+    // rather than input-schema rejection.
     expect(result.isError).toBe(true);
+    expect(api.requests).toContain(`DELETE /v1/agents/${CONTRACT_AGENT_ID}`);
   });
 
   it('logged to stderr at debug level without corrupting the stdout transport', async () => {

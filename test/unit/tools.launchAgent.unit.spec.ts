@@ -1,409 +1,109 @@
 import { http, HttpResponse } from 'msw';
 import { z } from 'zod';
-import { describe, expect, it, vi } from 'vitest';
-import { BadRequestError } from '../../src/client/errors.js';
-import { AGENT_ID_PATTERN } from '../../src/client/schemas.js';
-import { createLogger } from '../../src/log.js';
+import { describe, expect, it } from 'vitest';
+import { AgentIdConflictError, BadRequestError } from '../../src/client/errors.js';
 import { deleteAgentInput } from '../../src/tools/deleteAgent.js';
-import {
-  buildLaunchAgentBody,
-  launchAgentInput,
-  runLaunchAgent,
-  type StartLaunchTimer,
-} from '../../src/tools/launchAgent.js';
+import { buildLaunchAgentBody, launchAgentInput, runLaunchAgent } from '../../src/tools/launchAgent.js';
 import { buildCreateRunBody } from '../../src/tools/sendFollowup.js';
 import { makeClient } from '../helpers/client.js';
-import { agentFixture, createAgentFixture, errorBody, listRunsFixture } from '../helpers/fixtures.js';
+import { createAgentFixture, errorBody } from '../helpers/fixtures.js';
 import { BASE, mswServer, useMswServer } from '../helpers/mswServer.js';
 
 const AGENT = 'bc-00000000-0000-0000-0000-000000000001';
 
-/** A create the test holds open, so the launch timer can be made to win. */
-function gate(): { wait: Promise<void>; open: () => void } {
-  let open = (): void => {};
-  const wait = new Promise<void>((resolve) => {
-    open = () => resolve();
-  });
-  return { wait, open };
-}
-
-/** Captures the timer callback so a test can fire it deterministically. */
-function manualTimer(): { start: StartLaunchTimer; fire: () => void; cancels: () => number } {
-  let fire = (): void => {};
-  let cancels = 0;
-  return {
-    start: (args) => {
-      fire = args.fire;
-      return {
-        cancel: () => {
-          cancels += 1;
-        },
-      };
-    },
-    fire: () => fire(),
-    cancels: () => cancels,
-  };
-}
-
-const neverFires: StartLaunchTimer = () => ({ cancel: () => undefined });
-
 describe('launch_agent request body', () => {
-  it('omits repos and env entirely when they are not supplied', () => {
-    const body = buildLaunchAgentBody({ prompt: 'Do the thing' });
-    expect(body).toEqual({ prompt: { text: 'Do the thing' } });
-    expect(Object.keys(body)).not.toContain('repos');
-    expect(Object.keys(body)).not.toContain('env');
-    expect(JSON.stringify(body)).not.toContain('null');
+  it('forwards supplied fields and does not generate identity fields', () => {
+    expect(buildLaunchAgentBody({ prompt: 'Do it' })).toEqual({ prompt: { text: 'Do it' } });
+    expect(
+      buildLaunchAgentBody({ prompt: 'Do it', agentId: AGENT, name: 'Caller name', env: { type: 'cloud' } }),
+    ).toMatchObject({ agentId: AGENT, name: 'Caller name', env: { type: 'cloud' } });
   });
 
-  it('normalizes repo URL strings into RepoConfig objects', () => {
+  it('normalizes repository strings and model parameters for the API', () => {
     const body = buildLaunchAgentBody({
       prompt: 'x',
-      repos: ['https://github.com/your-org/your-repo', { url: 'https://github.com/a/b', startingRef: 'dev' }],
-    });
-    expect(body['repos']).toEqual([
-      { url: 'https://github.com/your-org/your-repo' },
-      { url: 'https://github.com/a/b', startingRef: 'dev' },
-    ]);
-  });
-
-  it('wraps the model id and params into the API shape', () => {
-    const body = buildLaunchAgentBody({
-      prompt: 'x',
+      repos: ['https://github.com/a/b'],
       model: 'composer-2',
-      modelParams: [{ id: 'fast', value: 'true' }],
+      modelParams: [{ id: 'thinking', value: 'high' }],
     });
-    expect(body['model']).toEqual({ id: 'composer-2', params: [{ id: 'fast', value: 'true' }] });
+    expect(body).toMatchObject({
+      repos: [{ url: 'https://github.com/a/b' }],
+      model: { id: 'composer-2', params: [{ id: 'thinking', value: 'high' }] },
+    });
   });
 
-  it('rejects modelParams without a model, and agentId together with envVars', () => {
-    expect(() => buildLaunchAgentBody({ prompt: 'x', modelParams: [{ id: 'fast', value: 'true' }] })).toThrow(
+  it('enforces known request constraints', () => {
+    expect(() => buildLaunchAgentBody({ prompt: 'x', modelParams: [{ id: 'x', value: 'y' }] })).toThrow(
       BadRequestError,
     );
-    expect(() =>
-      buildLaunchAgentBody({ prompt: 'x', agentId: AGENT, envVars: { FOO: 'bar' } }),
-    ).toThrow(BadRequestError);
+    expect(() => buildLaunchAgentBody({ prompt: 'x', agentId: AGENT, envVars: { FOO: 'bar' } })).toThrow(
+      BadRequestError,
+    );
   });
 
-  it('builds a follow-up body with only the keys that were provided', () => {
-    expect(buildCreateRunBody({ agentId: AGENT, prompt: 'more' })).toEqual({ prompt: { text: 'more' } });
+  it('keeps follow-up request shaping convenience', () => {
     expect(buildCreateRunBody({ agentId: AGENT, prompt: 'more', mode: 'plan' })).toEqual({
       prompt: { text: 'more' },
       mode: 'plan',
     });
   });
+
+  it('does not expose launchTimeoutMs and delete requires only agentId', () => {
+    expect(z.object(launchAgentInput).safeParse({ prompt: 'x', launchTimeoutMs: 1000 }).success).toBe(true);
+    expect(Object.keys(launchAgentInput)).not.toContain('launchTimeoutMs');
+    expect(z.object(deleteAgentInput).safeParse({ agentId: AGENT }).success).toBe(true);
+    expect(Object.keys(deleteAgentInput)).toEqual(['agentId']);
+  });
 });
 
-describe('launch_agent behaviour', () => {
+describe('launch_agent behavior', () => {
   useMswServer();
 
-  it('returns ids and a polling next step', async () => {
-    mswServer.use(http.post(`${BASE}/v1/agents`, () => HttpResponse.json(createAgentFixture, { status: 201 })));
-    const result = await runLaunchAgent({ client: makeClient(), input: { prompt: 'Add a README' } });
-
-    expect(result['agentId']).toBe(AGENT);
-    expect(result['runId']).toBe('run-00000000-0000-0000-0000-000000000001');
-    expect(result['runStatus']).toBe('CREATING');
-    expect(result['alreadyExisted']).toBe(false);
-    expect(result['pending']).toBe(false);
-    expect(String(result['nextSteps'])).toContain('get_run_events');
-    expect(String(result['nextSteps'])).toContain('wait_for_run');
-  });
-
-  it('cancels the launch timer when the create wins the race', async () => {
-    mswServer.use(http.post(`${BASE}/v1/agents`, () => HttpResponse.json(createAgentFixture, { status: 201 })));
-    const timer = manualTimer();
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README' },
-      startTimer: timer.start,
-    });
-
-    expect(result['pending']).toBe(false);
-    expect(timer.cancels()).toBe(1);
-  });
-
-  it('puts no undefined or null keys on the wire (raw body string)', async () => {
-    let raw = '';
+  it('awaits one POST and returns the complete native response', async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => void (release = resolve));
+    let posts = 0;
     mswServer.use(
-      http.post(`${BASE}/v1/agents`, async ({ request }) => {
-        raw = await request.text();
-        return HttpResponse.json(createAgentFixture, { status: 201 });
+      http.post(`${BASE}/v1/agents`, async () => {
+        posts += 1;
+        await held;
+        return HttpResponse.json({ ...createAgentFixture, upstreamField: { kept: true } }, { status: 201 });
       }),
     );
 
-    await runLaunchAgent({ client: makeClient(), input: { prompt: 'Add a README' } });
-
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    expect(Object.keys(parsed).sort()).toEqual(['agentId', 'prompt']);
-    expect(parsed['prompt']).toEqual({ text: 'Add a README' });
-    for (const key of ['repos', 'env', 'model', 'envVars', 'mcpServers', 'mode', 'images']) {
-      expect(raw, key).not.toContain(key);
-    }
-    expect(raw).not.toContain('null');
-  });
-
-  it('pre-assigns a client-generated agentId matching the bc-<uuid> pattern', async () => {
-    let raw = '';
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async ({ request }) => {
-        raw = await request.text();
-        return HttpResponse.json(createAgentFixture, { status: 201 });
-      }),
-    );
-
-    const result = await runLaunchAgent({ client: makeClient(), input: { prompt: 'Add a README' } });
-    const sent = (JSON.parse(raw) as { agentId?: string }).agentId ?? '';
-
-    expect(sent).toMatch(AGENT_ID_PATTERN);
-    expect(result['agentIdSource']).toBe('client');
-    expect(result['pending']).toBe(false);
-  });
-
-  it('pre-assigns no agentId when envVars is present, and names the agent so it can be found', async () => {
-    let raw = '';
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async ({ request }) => {
-        raw = await request.text();
-        return HttpResponse.json(createAgentFixture, { status: 201 });
-      }),
-    );
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', envVars: { FOO: 'bar' } },
+    let settled = false;
+    const pending = runLaunchAgent({ client: makeClient(), input: { prompt: 'Add a README' } }).then((value) => {
+      settled = true;
+      return value;
     });
-    const sent = JSON.parse(raw) as { agentId?: string; name?: string };
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    release();
 
-    expect(sent.agentId).toBeUndefined();
-    expect(sent.name).toMatch(/^mcp-launch-[0-9a-f]{8}$/);
-    expect(result['agentIdSource']).toBe('server');
-  });
-
-  it('passes a caller-supplied agentId through untouched', async () => {
-    let raw = '';
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async ({ request }) => {
-        raw = await request.text();
-        return HttpResponse.json(createAgentFixture, { status: 201 });
-      }),
-      http.get(`${BASE}/v1/agents/${AGENT}`, () => HttpResponse.json(agentFixture)),
-    );
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', agentId: AGENT },
+    await expect(pending).resolves.toMatchObject({
+      agent: createAgentFixture.agent,
+      run: createAgentFixture.run,
+      upstreamField: { kept: true },
     });
-
-    expect((JSON.parse(raw) as { agentId?: string }).agentId).toBe(AGENT);
-    expect(result['agentIdSource']).toBe('caller');
+    expect(posts).toBe(1);
   });
 
-  it('recovers when agent_id_conflict comes back as a 400 rather than a 409', async () => {
-    // The OpenAPI spec says 409, but Cursor's prose docs have also called this
-    // a 400. Either way the launch must resolve to the existing agent.
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, () =>
-        HttpResponse.json(errorBody('agent_id_conflict', 'already exists'), { status: 400 }),
-      ),
-      http.get(`${BASE}/v1/agents/${AGENT}`, () => HttpResponse.json(agentFixture)),
-      http.get(`${BASE}/v1/agents/${AGENT}/runs`, () => HttpResponse.json(listRunsFixture)),
-    );
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', agentId: AGENT },
-    });
-    expect(result['alreadyExisted']).toBe(true);
-    expect(result['agentId']).toBe(AGENT);
-  });
-
-  it('recovers from 409 agent_id_conflict by returning the existing agent', async () => {
-    let creates = 0;
+  it('surfaces agent_id_conflict and performs no recovery GETs', async () => {
+    let posts = 0;
+    let gets = 0;
     mswServer.use(
       http.post(`${BASE}/v1/agents`, () => {
-        creates += 1;
+        posts += 1;
         return HttpResponse.json(errorBody('agent_id_conflict', 'already exists'), { status: 409 });
       }),
-      http.get(`${BASE}/v1/agents/${AGENT}`, () => HttpResponse.json(agentFixture)),
-      http.get(`${BASE}/v1/agents/${AGENT}/runs`, () => HttpResponse.json(listRunsFixture)),
-    );
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', agentId: AGENT },
-    });
-
-    expect(creates).toBe(1);
-    expect(result['alreadyExisted']).toBe(true);
-    expect(result['agentId']).toBe(AGENT);
-    expect(result['runId']).toBe('run-00000000-0000-0000-0000-000000000002');
-    expect(String(result['nextSteps'])).toContain('nothing new was launched');
-  });
-
-  it('still fails on agent_id_conflict when the caller did not supply an agentId', async () => {
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, () =>
-        HttpResponse.json(errorBody('agent_id_conflict', 'already exists'), { status: 409 }),
-      ),
-    );
-    await expect(runLaunchAgent({ client: makeClient(), input: { prompt: 'x' } })).rejects.toThrow(
-      /already exists/,
-    );
-  });
-});
-
-describe('launch_agent create timeout (MCP client timeout safety)', () => {
-  useMswServer();
-
-  it('returns a pending success carrying the pre-assigned agentId when the timer wins', async () => {
-    const held = gate();
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async () => {
-        await held.wait;
-        return HttpResponse.json(createAgentFixture, { status: 201 });
+      http.get(`${BASE}/v1/agents/${AGENT}`, () => {
+        gets += 1;
+        return HttpResponse.json({});
       }),
     );
-    const timer = manualTimer();
-
-    const pending = runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', launchTimeoutMs: 5000 },
-      startTimer: timer.start,
-    });
-    timer.fire();
-    const result = await pending;
-
-    expect(result['pending']).toBe(true);
-    expect(result['runId']).toBeNull();
-    expect(result['agentStatus']).toBeNull();
-    expect(result['runStatus']).toBeNull();
-    expect(result['launchTimeoutMs']).toBe(5000);
-    expect(result['agentIdSource']).toBe('client');
-    expect(String(result['agentId'])).toMatch(AGENT_ID_PATTERN);
-    const hint = String(result['hint']);
-    expect(hint).toContain('still creating');
-    expect(hint).toContain(`get_agent with agentId="${String(result['agentId'])}"`);
-    expect(hint).toContain('list_runs');
-
-    held.open();
-  });
-
-  it('tells the model to find the agent by name when envVars forced a server-minted id', async () => {
-    const held = gate();
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async () => {
-        await held.wait;
-        return HttpResponse.json(createAgentFixture, { status: 201 });
-      }),
-    );
-    const timer = manualTimer();
-
-    const pending = runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README', envVars: { FOO: 'bar' } },
-      startTimer: timer.start,
-    });
-    timer.fire();
-    const result = await pending;
-
-    expect(result['pending']).toBe(true);
-    expect(result['agentId']).toBeNull();
-    const hint = String(result['hint']);
-    expect(hint).toContain('list_agents');
-    expect(hint).toContain(String(result['name']));
-    expect(hint).toContain('Drop `envVars`');
-
-    held.open();
-  });
-
-  it('logs, and never rejects, when the background create finishes after the pending result', async () => {
-    const held = gate();
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async () => {
-        await held.wait;
-        return HttpResponse.json(createAgentFixture, { status: 201 });
-      }),
-    );
-    const lines: string[] = [];
-    const unhandled = vi.fn();
-    process.on('unhandledRejection', unhandled);
-    const timer = manualTimer();
-
-    const pending = runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README' },
-      logger: createLogger({ level: 'debug', write: (line) => void lines.push(line) }),
-      startTimer: timer.start,
-    });
-    timer.fire();
-    const result = await pending;
-    expect(result['pending']).toBe(true);
-
-    held.open();
-    await vi.waitFor(() => expect(lines.join('')).toContain('launch_agent create finished'));
-    expect(lines.join('')).toContain(AGENT);
-    expect(unhandled).not.toHaveBeenCalled();
-    process.off('unhandledRejection', unhandled);
-  });
-
-  it('logs a warning, and never rejects, when the background create fails after the pending result', async () => {
-    const held = gate();
-    mswServer.use(
-      http.post(`${BASE}/v1/agents`, async () => {
-        await held.wait;
-        return HttpResponse.json(errorBody('internal_error', 'boom'), { status: 500 });
-      }),
-    );
-    const lines: string[] = [];
-    const unhandled = vi.fn();
-    process.on('unhandledRejection', unhandled);
-    const timer = manualTimer();
-
-    const pending = runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README' },
-      logger: createLogger({ level: 'debug', write: (line) => void lines.push(line) }),
-      startTimer: timer.start,
-    });
-    timer.fire();
-    await pending;
-
-    held.open();
-    await vi.waitFor(() => expect(lines.join('')).toContain('launch_agent create failed'));
-    await new Promise((resolve) => void setTimeout(resolve, 20));
-    expect(unhandled).not.toHaveBeenCalled();
-    process.off('unhandledRejection', unhandled);
-  });
-
-  it('never returns pending when the create answers first', async () => {
-    mswServer.use(http.post(`${BASE}/v1/agents`, () => HttpResponse.json(createAgentFixture, { status: 201 })));
-
-    const result = await runLaunchAgent({
-      client: makeClient(),
-      input: { prompt: 'Add a README' },
-      startTimer: neverFires,
-    });
-
-    expect(result['pending']).toBe(false);
-    expect(result['agentId']).toBe(AGENT);
-    expect(result['runId']).toBe('run-00000000-0000-0000-0000-000000000001');
-  });
-
-  it('rejects a launchTimeoutMs outside 5000-120000 at the schema level', () => {
-    const schema = z.object(launchAgentInput);
-    expect(schema.safeParse({ prompt: 'x', launchTimeoutMs: 4999 }).success).toBe(false);
-    expect(schema.safeParse({ prompt: 'x', launchTimeoutMs: 120001 }).success).toBe(false);
-    expect(schema.safeParse({ prompt: 'x', launchTimeoutMs: 45000 }).success).toBe(true);
-  });
-});
-
-describe('delete_agent input validation', () => {
-  it('refuses to run without confirm: true', () => {
-    const schema = z.object(deleteAgentInput);
-    expect(schema.safeParse({ agentId: AGENT }).success).toBe(false);
-    expect(schema.safeParse({ agentId: AGENT, confirm: false }).success).toBe(false);
-    expect(schema.safeParse({ agentId: AGENT, confirm: true }).success).toBe(true);
+    await expect(
+      runLaunchAgent({ client: makeClient(), input: { prompt: 'x', agentId: AGENT } }),
+    ).rejects.toBeInstanceOf(AgentIdConflictError);
+    expect({ posts, gets }).toEqual({ posts: 1, gets: 0 });
   });
 });

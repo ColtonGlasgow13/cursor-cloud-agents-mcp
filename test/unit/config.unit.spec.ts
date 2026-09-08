@@ -9,7 +9,6 @@ describe('loadConfig', () => {
       apiKey: 'crsr_abc',
       baseUrl: DEFAULT_BASE_URL,
       logLevel: 'warn',
-      rateLimitPerMin: 20,
     });
   });
 
@@ -31,9 +30,8 @@ describe('loadConfig', () => {
     expect((error as ConfigError).message).toContain('print-config');
   });
 
-  it('rejects a bad log level or rate limit', () => {
+  it('rejects a bad log level', () => {
     expect(() => loadConfig({ CURSOR_API_KEY: 'k', CURSOR_MCP_LOG_LEVEL: 'loud' })).toThrow(ConfigError);
-    expect(() => loadConfig({ CURSOR_API_KEY: 'k', CURSOR_MCP_RATE_LIMIT_PER_MIN: '0' })).toThrow(ConfigError);
   });
 });
 

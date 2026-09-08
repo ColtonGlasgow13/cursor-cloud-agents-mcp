@@ -13,8 +13,10 @@ import {
   NotFoundError,
   RunNotCancellableError,
   StreamExpiredError,
+  RateLimitedError,
   formatErrorForTool,
 } from '../../src/client/errors.js';
+import { toolFailure } from '../../src/tools/shared.js';
 import { makeClient } from '../helpers/client.js';
 import { errorBody } from '../helpers/fixtures.js';
 import { BASE, mswServer, useMswServer } from '../helpers/mswServer.js';
@@ -34,7 +36,7 @@ describe('HTTP error mapping', () => {
     const error = await makeClient().me().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(AuthError);
     const text = formatErrorForTool(error);
-    expect(text).toContain('Check CURSOR_API_KEY');
+    expect(text).toContain('CURSOR_API_KEY');
     expect(text).not.toContain('crsr_test_key');
   });
 
@@ -62,8 +64,9 @@ describe('HTTP error mapping', () => {
       .getRun({ agentId: AGENT, runId: RUN })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(NotFoundError);
-    expect((error as NotFoundError).message).toContain(RUN);
-    expect((error as NotFoundError).message).toContain(AGENT);
+    expect((error as NotFoundError).message).toBe('Run not found');
+    expect(formatErrorForTool(error)).toContain(RUN);
+    expect(formatErrorForTool(error)).toContain(AGENT);
   });
 
   it('splits 409 by error code', async () => {
@@ -156,5 +159,32 @@ describe('HTTP error mapping', () => {
     );
     const error = await makeClient().me().catch((e: unknown) => e);
     expect(formatErrorForTool(error)).toContain('https://cursor.com/docs/integrations');
+  });
+});
+
+describe('MCP error structure', () => {
+  it('preserves native error metadata alongside isError text', () => {
+    const result = toolFailure(
+      new RateLimitedError({
+        message: 'slow down',
+        status: 429,
+        code: 'rate_limit_exceeded',
+        requestId: 'req-123',
+        retryAfterMs: 7000,
+        details: { remaining: '0' },
+      }),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: {
+        name: 'RateLimitedError',
+        message: 'slow down',
+        status: 429,
+        code: 'rate_limit_exceeded',
+        requestId: 'req-123',
+        retryAfterMs: 7000,
+        details: { remaining: '0' },
+      },
+    });
   });
 });

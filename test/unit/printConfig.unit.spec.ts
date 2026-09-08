@@ -7,6 +7,7 @@ describe('print-config', () => {
     expect(out).toContain(
       'claude mcp add cursor-cloud-agents --env CURSOR_API_KEY=<YOUR_CURSOR_API_KEY> -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp',
     );
+    expect(out).toContain('MCP_TOOL_TIMEOUT=180000');
   });
 
   it('emits valid JSON plus a decodable Cursor deeplink', () => {
@@ -34,6 +35,7 @@ describe('print-config', () => {
     const out = printConfig({ harness: 'codex', name: 'cursor-agents' });
     expect(out).toContain('codex mcp add cursor-agents');
     expect(out).toContain('[mcp_servers.cursor-agents]');
+    expect(out).toContain('tool_timeout_sec = 180');
     expect(out).not.toContain('mcpServers.cursor-agents');
   });
 

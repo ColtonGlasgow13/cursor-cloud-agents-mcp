@@ -14,13 +14,7 @@ export async function runCancelRun({
   client: CursorClient;
   input: { agentId: string; runId: string };
 }): Promise<ToolData> {
-  const result = await client.cancelRun(input);
-  return {
-    ...result,
-    cancelled: true,
-    nextSteps:
-      'The run transitions to CANCELLED and cannot be resumed. Call get_run to confirm, or send_followup to continue the conversation with a new run.',
-  };
+  return client.cancelRun(input);
 }
 
 export function registerCancelRun({ server, client }: RegisterToolArgs): void {
@@ -29,7 +23,7 @@ export function registerCancelRun({ server, client }: RegisterToolArgs): void {
     {
       title: 'Cancel an active run',
       description:
-        'Stops the active run on an agent. Cancellation is TERMINAL: the run becomes CANCELLED and cannot be resumed — to continue the conversation, call send_followup which starts a new run on the same agent (the workspace is preserved). Use this when a run is going the wrong way, or to clear an AgentBusyError before sending a follow-up. Cancelling an already-terminal run returns RunNotCancellableError, which is safe to ignore.',
+        'Cancels an active run with POST /v1/agents/{agentId}/runs/{runId}/cancel and returns Cursor\'s complete response. A cancelled run cannot be resumed.',
       inputSchema: cancelRunInput,
       annotations: {
         readOnlyHint: false,

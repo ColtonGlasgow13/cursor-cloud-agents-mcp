@@ -38,17 +38,10 @@ export async function runSendFollowup({
   client: CursorClient;
   input: SendFollowupArgs;
 }): Promise<ToolData> {
-  const { run } = await client.createRun({
+  return client.createRun({
     agentId: input.agentId,
     body: buildCreateRunBody(input),
   });
-  return {
-    agentId: input.agentId,
-    runId: run.id,
-    runStatus: run.status,
-    run,
-    nextSteps: `Poll with get_run_events (agentId="${input.agentId}", runId="${run.id}", passing afterEventId=nextEventId each time) or call wait_for_run, then get_run for the final result.`,
-  };
 }
 
 export function registerSendFollowup({ server, client }: RegisterToolArgs): void {
@@ -57,11 +50,11 @@ export function registerSendFollowup({ server, client }: RegisterToolArgs): void
     {
       title: 'Send a follow-up prompt to an agent',
       description:
-        'Creates a new run on an EXISTING agent, reusing its conversation history and workspace. Use this to iterate ("also add tests", "address the review comments") instead of launching a fresh agent, which would start from a clean clone.\n\nOnly one run can be active per agent: if a run is still CREATING or RUNNING this returns AgentBusyError — wait for it with wait_for_run, or stop it with cancel_run, then retry. If the agent is archived, call unarchive_agent first.\n\nNEXT STEP: follow the new run with get_run_events or wait_for_run. This call is NEVER retried automatically, because a duplicate POST would queue a second run.',
+        'Creates a run on an existing agent with POST /v1/agents/{agentId}/runs and returns Cursor\'s complete response. The run reuses the agent conversation and workspace. Writes are never retried automatically.',
       inputSchema: sendFollowupInput,
       annotations: {
         readOnlyHint: false,
-        destructiveHint: false,
+        destructiveHint: true,
         idempotentHint: false,
         openWorldHint: true,
       },

@@ -98,7 +98,7 @@ export class RunNotCancellableError extends ConflictError {}
 /** 410 `stream_expired` — the SSE retention window has passed. */
 export class StreamExpiredError extends CursorApiError {}
 
-/** 429 from the API itself (as opposed to our local budget). */
+/** 429 from the Cursor API. */
 export class RateLimitedError extends CursorApiError {
   readonly retryAfterMs: number | undefined;
 
@@ -114,7 +114,7 @@ export class ServerError extends CursorApiError {}
 /** fetch() rejected (DNS, ECONNRESET, TLS, ...) — no HTTP response was produced. */
 export class NetworkError extends CursorApiError {}
 
-/** The response parsed as JSON but did not match the expected schema. */
+/** The response was not valid JSON. Schema drift in JSON objects is non-fatal. */
 export class ResponseValidationError extends CursorApiError {
   /** Flattened zod issues: `path: message`. */
   readonly issues: string[];
@@ -125,19 +125,6 @@ export class ResponseValidationError extends CursorApiError {
     super(init);
     this.issues = init.issues;
     this.rawBody = init.rawBody;
-  }
-}
-
-/**
- * Our own client-side budget refused the request before it was sent.
- * No API call was made, so it is always safe to try again later.
- */
-export class LocalRateLimitError extends CursorApiError {
-  readonly retryAfterMs: number;
-
-  constructor(init: CursorApiErrorInit & { retryAfterMs: number }) {
-    super(init);
-    this.retryAfterMs = init.retryAfterMs;
   }
 }
 
