@@ -57,7 +57,7 @@ async function serve(): Promise<void> {
     rateLimitPerMin: config.rateLimitPerMin,
     logger,
   });
-  const server = createServer({ client });
+  const server = createServer({ client, logger });
   const transport = new StdioServerTransport();
 
   // A stray rejection must never take the transport down mid-conversation.

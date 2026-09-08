@@ -25,13 +25,21 @@ describe.skipIf(!enabled)('cloud agent lifecycle (live API)', () => {
   });
 
   it('launches a no-repo agent, polls it to a terminal status and deletes it', async () => {
+    // The real create blocks until the first run is provisioned (measured at
+    // 61.9s for a no-repo agent), so this asks for the maximum wait instead of
+    // the 45s default — otherwise the launch returns `pending` with no runId.
     const launched = await runLaunchAgent({
       client,
-      input: { prompt: 'Reply with the single word PONG and finish.', name: 'mcp integration smoke' },
+      input: {
+        prompt: 'Reply with the single word PONG and finish.',
+        name: 'mcp integration smoke',
+        launchTimeoutMs: 120_000,
+      },
     });
     agentId = String(launched['agentId']);
     const runId = String(launched['runId']);
     expect(agentId).toMatch(/^bc-/);
+    expect(launched['pending'], 'create did not finish within 120s').toBe(false);
 
     let afterEventId: string | undefined;
     let terminal = false;

@@ -141,14 +141,53 @@ export class LocalRateLimitError extends CursorApiError {
   }
 }
 
+/** Cap on how many zod issues reach the model; the rest are counted, not listed. */
+export const MAX_REPORTED_ISSUES = 20;
+/** Cap on the raw body echoed into a tool error, in characters. */
+export const MAX_RAW_BODY_CHARS = 4000;
+
+/** `path: message` lines, capped so a wholesale shape change cannot flood the model. */
+function formatIssues(issues: string[]): string {
+  const shown = issues.slice(0, MAX_REPORTED_ISSUES);
+  const hidden = issues.length - shown.length;
+  const suffix = hidden > 0 ? `\n- ...and ${hidden} more issue(s)` : '';
+  return `Schema issues:\n- ${shown.join('\n- ')}${suffix}`;
+}
+
+/**
+ * The raw body, JSON-stringified and truncated. This is the whole point of
+ * ResponseValidationError — its guidance tells the model the body is here.
+ */
+function formatRawBody(rawBody: unknown): string | undefined {
+  if (rawBody === undefined) return undefined;
+  let text: string;
+  if (typeof rawBody === 'string') {
+    text = rawBody;
+  } else {
+    try {
+      text = JSON.stringify(rawBody) ?? String(rawBody);
+    } catch {
+      text = String(rawBody);
+    }
+  }
+  if (text === '') return undefined;
+  const truncated =
+    text.length > MAX_RAW_BODY_CHARS
+      ? `${text.slice(0, MAX_RAW_BODY_CHARS)}...[truncated ${text.length - MAX_RAW_BODY_CHARS} chars]`
+      : text;
+  return `Raw body:\n${truncated}`;
+}
+
 /** Formats an error for a tool response: class name, message, help URL, guidance. */
 export function formatErrorForTool(error: unknown): string {
   if (error instanceof CursorApiError) {
     const parts = [`${error.name}: ${error.message}`];
     if (error.requestId !== undefined) parts.push(`requestId: ${error.requestId}`);
     if (error.helpUrl !== undefined) parts.push(`See: ${error.helpUrl}`);
-    if (error instanceof ResponseValidationError && error.issues.length > 0) {
-      parts.push(`Schema issues:\n- ${error.issues.join('\n- ')}`);
+    if (error instanceof ResponseValidationError) {
+      if (error.issues.length > 0) parts.push(formatIssues(error.issues));
+      const rawBody = formatRawBody(error.rawBody);
+      if (rawBody !== undefined) parts.push(rawBody);
     }
     if (error.guidance !== '') parts.push(error.guidance);
     return parts.join('\n\n');

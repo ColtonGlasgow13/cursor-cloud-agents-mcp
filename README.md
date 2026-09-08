@@ -130,7 +130,7 @@ CURSOR_API_KEY=crsr_... npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp do
 
 | Tool | What it does | Key inputs |
 | --- | --- | --- |
-| `launch_agent` | Creates an agent and starts its first run | `prompt`, `repos?`, `model?`, `mode?`, `autoCreatePR?`, `agentId?` |
+| `launch_agent` | Creates an agent and starts its first run. Can return `pending: true` — see below | `prompt`, `repos?`, `model?`, `mode?`, `autoCreatePR?`, `agentId?`, `launchTimeoutMs?` |
 | `send_followup` | New run on an existing agent, same workspace and history | `agentId`, `prompt`, `mode?` |
 | `cancel_run` | Terminally cancels the active run | `agentId`, `runId` |
 | `archive_agent` / `unarchive_agent` | Reversible cleanup / restore | `agentId` |
@@ -154,17 +154,34 @@ The whole point of the server is that this loop is spelled out for the model in 
 
 **Streaming (you want to see progress):**
 
-1. `launch_agent` → `{ agentId, runId }`.
+1. `launch_agent` → `{ agentId, runId }` (or `{ pending: true, agentId }` — see below).
 2. `get_run_events` with those ids and no `afterEventId`.
 3. If `isTerminal` is false: sleep `suggestedPollDelayMs` (≈5s), then call `get_run_events` again with
    `afterEventId = nextEventId`. Repeat.
-4. When `isTerminal` is true: `get_run` for `run.result` (the final assistant reply) and `prUrls`.
+4. When `isTerminal` is true: `get_run` for `run.result` and `prUrls`. A terminal run does **not** always have
+   `result` — cancelled, errored and expired runs usually have none, and the hint says so instead of promising it.
 
 **Blocking (you only want the answer):**
 
 1. `launch_agent` → `{ agentId, runId }`.
 2. `wait_for_run` (default 55s). If it returns `isTerminal: false` that is **not an error** — call it again with
    `afterEventId = lastEventId`. Cloud runs commonly take several minutes.
+
+**If `launch_agent` returned `pending: true`:** the run id does not exist yet. Poll `get_agent` with the
+`agentId` from that result about every 10s (it 404s until the agent appears), then `list_runs` for the first
+`runId`, then rejoin either loop above at step 2.
+
+Three things a live run proved you cannot assume:
+
+- **Do not depend on a `done`/`result` event** — some runs finish without one (a 3-minute plan-mode run emitted
+  neither, nor an `error`; only the sticky `status` framing event and the run record showed it had finished).
+  `isTerminal` is derived from the run status, so trust that.
+- **`git.branches` is not proof of a push.** Cursor reserves a branch name when the run starts: a live run
+  reported `cursor/mcp-live-…` for a ref that never existed on GitHub. `branches` lists reserved/target branch
+  names; a `prUrl` is the only reliable signal that work was published.
+- **Plan-mode runs keep the plan in an artifact**, not in `result` (`result` was just the closing line "…Let me
+  write the plan."). Call `list_artifacts`, then `download_artifact` on `artifacts/plans/<name>.plan.md` —
+  minting that presigned URL takes 30–40s.
 
 **Rate-limit budget.** Cursor's documented default is ~20 requests/minute per user, and this server enforces the
 same budget locally so you fail fast instead of collecting 429s. Every stream open and every snapshot is one
@@ -175,6 +192,25 @@ server refuses extra calls locally rather than burning the server-side allowance
 
 If the local budget is exhausted, tools return `LocalRateLimitError` with a "try again in Ns" message and **no
 request is sent**.
+
+### Why `launch_agent` may return pending
+
+`POST /v1/agents` is **not** fire-and-forget: it blocks until Cursor has provisioned the first run. A trivial
+no-repo agent was measured at **61.9 seconds**, which is past the MCP SDK's 60s default tool timeout — so a
+default-configured client would abort the call *after* the agent had been created and billed, leaving the caller
+with no `agentId` and an orphan agent.
+
+So `launch_agent` races the create against `launchTimeoutMs` (default **45000**, min 5000, max 120000, kept under
+that 60s default). If the timer wins, the tool returns a normal **success** result with `pending: true`, the
+`agentId` it pre-assigned, `runId: null`, and a hint spelling out the recovery loop; the create keeps running in
+this server's background and its outcome is logged to stderr. Nothing is lost and nothing is retried.
+
+To make that recoverable, every launch that can carry a client-supplied id gets one: this server generates
+`bc-<uuid>` itself when you do not pass `agentId`, and reports `agentIdSource: "caller" | "client" | "server"`.
+Re-sending that id is safe — the API answers `409 agent_id_conflict` and the tool returns the existing agent with
+`alreadyExisted: true` rather than launching a second one. The exception is `envVars`, which forces a
+server-minted id: those launches get a generated `name` (`mcp-launch-<8 hex>`) instead, and a pending result tells
+you to find the agent with `list_agents`. Lower `launchTimeoutMs` if your client's tool timeout is under 45s.
 
 ## Error semantics
 
@@ -195,7 +231,7 @@ request is sent**.
 | 429 | `RateLimitedError` | Carries `retryAfterMs` plus any `X-RateLimit-*` headers. |
 | 5xx | `ServerError` | GETs already retried 3×. |
 | fetch failed | `NetworkError` | No HTTP response was produced. |
-| response shape mismatch | `ResponseValidationError` | Beta drift: includes zod issues **and** the raw body. |
+| response shape mismatch | `ResponseValidationError` | Beta drift: the tool text carries up to 20 zod issues **and** the raw body (truncated at 4000 chars). |
 | local budget exhausted | `LocalRateLimitError` | Nothing was sent; safe to retry later. |
 
 Every one of these is returned as an MCP `isError` result containing
@@ -239,6 +275,22 @@ RUN_INTEGRATION=1 CURSOR_API_KEY=crsr_... pnpm test:integration
 ```
 
 They launch a no-repo agent with a trivial prompt, poll it to a terminal status, and delete it in a `finally`.
+
+### Live smoke tests
+
+Two scripts drive the built server over real MCP stdio against the real `https://api.cursor.com`. **Both need
+`CURSOR_API_KEY`, both cost real agent minutes, and neither runs in CI.** Build first (`pnpm build`).
+
+```bash
+CURSOR_API_KEY=crsr_... pnpm live:suite
+CURSOR_API_KEY=crsr_... REPO_URL=https://github.com/your-org/your-repo pnpm live:repo launch
+CURSOR_API_KEY=crsr_... pnpm live:repo monitor <agentId> <runId>
+```
+
+- `live:suite` walks every tool end to end. It creates **one** no-repo agent and **deletes** it in a `finally`.
+- `live:repo` launches a real agent on `REPO_URL` in two phases — `launch` prints the `agentId`/`runId` (and
+  survives a pending launch), `monitor <agentId> <runId>` follows it to a terminal status — and **archives** the
+  agent when it is done.
 
 **Release notes.** `files` ships only `dist/`, `README.md` and `LICENSE`; `dist/` is gitignored. The `prepare`
 script runs `npm run build` (npm, not pnpm — npm is what actually runs it during a git install), and npm runs

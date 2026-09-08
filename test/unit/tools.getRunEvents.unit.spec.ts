@@ -184,6 +184,36 @@ describe('get_run_events terminal-status consistency', () => {
     expect(String(result['hint'])).toContain('afterEventId="d1"');
   });
 
+  it('does not promise result text when the snapshot shows a terminal run without one', async () => {
+    const cancelled = { ...finishedRunFixture, status: 'CANCELLED' } as Record<string, unknown>;
+    delete cancelled['result'];
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text: '' })] },
+      { match: isRunGet, responses: [() => jsonResponse(cancelled)] },
+    ]);
+
+    const result = await runGetRunEvents({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 500 },
+    });
+
+    expect(result['isTerminal']).toBe(true);
+    expect(String(result['hint'])).toContain('no result text');
+    expect(String(result['hint'])).not.toContain('final result text');
+  });
+
+  it('still points at the final result text when the snapshot has one', async () => {
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text: '' })] },
+      { match: isRunGet, responses: [() => jsonResponse(finishedRunFixture)] },
+    ]);
+    const result = await runGetRunEvents({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 500 },
+    });
+    expect(String(result['hint'])).toContain('Call get_run for the final result text');
+  });
+
   it('spends no snapshot GET when the stream already reported a terminal result', async () => {
     const router = routerFetch([
       { match: isStream, responses: [() => sseResponse({ text: SSE_TRANSCRIPT })] },

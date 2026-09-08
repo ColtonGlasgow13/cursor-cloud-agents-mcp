@@ -56,6 +56,8 @@ export const agentSummarySchema = z.looseObject({
   createdAt: z.string(),
   updatedAt: z.string(),
   latestRunId: z.string().optional(),
+  /** Undocumented, observed live on create, get_agent AND list items. */
+  openAsCursorGithubApp: z.boolean().optional(),
 });
 
 export const agentSchema = agentSummarySchema.extend({
@@ -169,16 +171,24 @@ export const tokenUsageSchema = z.looseObject({
   totalTokens: z.number().optional(),
 });
 
+/** Undocumented, observed live at the top level AND inside each `runs[]` entry. */
+export const usageCostSchema = z.looseObject({
+  rawCostCents: z.number().optional(),
+  chargedCents: z.number().optional(),
+});
+
 // Early-access endpoint: keep everything optional so a partial rollout shape
 // still parses instead of blowing up the tool call.
 export const usageResponseSchema = z.looseObject({
   totalUsage: tokenUsageSchema.optional(),
+  cost: usageCostSchema.optional(),
   runs: z
     .array(
       z.looseObject({
         id: z.string(),
         usageUuid: z.string().optional(),
         usage: tokenUsageSchema.optional(),
+        cost: usageCostSchema.optional(),
       }),
     )
     .optional(),

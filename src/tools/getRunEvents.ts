@@ -5,6 +5,7 @@ import { ALL_EVENT_TYPES } from '../client/sse.js';
 import {
   extractPrUrls,
   isTerminalRunStatus,
+  readRunResultText,
   suggestedPollDelayMs,
   unknownStatusWarning,
   withErrorHandling,
@@ -94,6 +95,9 @@ export async function runGetRunEvents({
 
     const nextEventId = stream.lastEventId;
     const warning = unknownStatusWarning(runStatus);
+    // Only claim there is result text when a snapshot proved it: a CANCELLED or
+    // ERROR run reaches a terminal status with no assistant reply at all.
+    const noResultText = snapshot !== undefined && readRunResultText(snapshot) === undefined;
     return {
       events: stream.events,
       eventCount: stream.events.length,
@@ -107,7 +111,11 @@ export async function runGetRunEvents({
       suggestedPollDelayMs: suggestedPollDelayMs(isTerminal),
       ...(warning === undefined ? {} : { warning }),
       hint: isTerminal
-        ? `Finished with status ${runStatus ?? 'unknown'}. Call get_run for the final result text and PR URLs.`
+        ? `Finished with status ${runStatus ?? 'unknown'}. ${
+            noResultText
+              ? 'This run produced no result text; call get_run for the final state and PR URLs.'
+              : 'Call get_run for the final result text and PR URLs.'
+          }`
         : `Not finished (status ${runStatus ?? 'unknown'}). Sleep ~5s, then call get_run_events again with afterEventId=${
             nextEventId === null ? '(omit it)' : `"${nextEventId}"`
           }. Each poll costs one request against the ~20/min budget, so do not poll faster than every few seconds.`,
@@ -157,7 +165,7 @@ export function registerGetRunEvents({ server, client }: RegisterToolArgs): void
     {
       title: 'Poll a run for new events',
       description:
-        "The SSE-to-poll bridge: opens the run's event stream, collects whatever arrives within maxWaitMs (default 4s), closes it, and returns the events plus a resume cursor. This is the main way to watch a cloud agent work.\n\nHOW TO USE: call once with no afterEventId, then repeatedly with afterEventId=<the nextEventId you were just given>, sleeping ~5s between calls, until isTerminal is true. Then call get_run for the final result text and PR URLs. Every call costs one request against the ~20 requests/minute budget — do not poll in a tight loop. For a single longer wait, use wait_for_run instead.\n\nReturns assistant/thinking/tool_call/result/error/done events by default; heartbeats and status framing are dropped. If `streamExpired` is true the retention window has passed and you must switch to get_run. If `cursorInvalid` is true your afterEventId did not belong to this run — call again without it.",
+        "The SSE-to-poll bridge: opens the run's event stream, collects whatever arrives within maxWaitMs (default 4s), closes it, and returns the events plus a resume cursor. This is the main way to watch a cloud agent work.\n\nHOW TO USE: call once with no afterEventId, then repeatedly with afterEventId=<the nextEventId you were just given>, sleeping ~5s between calls, until isTerminal is true. Then call get_run for the final result text and PR URLs. Every call costs one request against the ~20 requests/minute budget — do not poll in a tight loop. For a single longer wait, use wait_for_run instead.\n\nReturns assistant/thinking/tool_call/result/error/done events by default when they occur; heartbeats and status framing are dropped. Do NOT wait for a `done` or `result` event: some runs (a 3-minute plan-mode run, live) finish without ever emitting one, and their completion is visible only in the run status. `isTerminal` is derived from that status and is the only signal to trust. If `streamExpired` is true the retention window has passed and you must switch to get_run. If `cursorInvalid` is true your afterEventId did not belong to this run — call again without it.",
       inputSchema: getRunEventsInput,
       annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
     },

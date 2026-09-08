@@ -84,7 +84,9 @@ export const envInput = z
 
 export const modeInput = z
   .enum(AGENT_MODES)
-  .describe('"agent" (default) makes changes; "plan" produces a plan without implementing it.');
+  .describe(
+    '"agent" (default) makes changes; "plan" makes the agent write a plan artifact instead of changing code — retrieve it with list_artifacts then download_artifact (the run\'s `result` is only the closing assistant line, not the plan).',
+  );
 
 export const agentIdInput = z
   .string()

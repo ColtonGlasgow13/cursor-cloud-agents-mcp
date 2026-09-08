@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AgentIdConflictError, BadRequestError } from '../client/errors.js';
 import type { CursorClient } from '../client/index.js';
+import type { CreateAgentResponse } from '../client/types.js';
+import { silentLogger, type Logger } from '../log.js';
 import {
   agentIdInput,
   customSubagentInput,
@@ -12,6 +15,26 @@ import {
   repoInput,
 } from './agentInputs.js';
 import { compact, withErrorHandling, type RegisterToolArgs, type ToolData } from './shared.js';
+
+/**
+ * Below the MCP SDK's 60s default client timeout (DEFAULT_REQUEST_TIMEOUT_MSEC),
+ * because `POST /v1/agents` blocks until the first run is provisioned and has
+ * been measured at 61.9s for a trivial no-repo agent. Returning a `pending`
+ * result at 45s is the difference between the caller learning the agentId and
+ * the client aborting on a billed agent nobody can find.
+ */
+export const DEFAULT_LAUNCH_TIMEOUT_MS = 45_000;
+
+/** Resolved by the timer arm of the create race. */
+const LAUNCH_TIMED_OUT = 'launch-timed-out';
+
+/** Cancellable timer, injected in tests. `sleep` cannot be cancelled, so it is not enough here. */
+export type StartLaunchTimer = (args: { ms: number; fire: () => void }) => { cancel: () => void };
+
+const defaultStartTimer: StartLaunchTimer = ({ ms, fire }) => {
+  const handle = setTimeout(fire, ms);
+  return { cancel: () => clearTimeout(handle) };
+};
 
 export const launchAgentInput = {
   prompt: z.string().min(1).describe('What the agent should do. Be specific; this is the whole task brief.'),
@@ -47,6 +70,15 @@ export const launchAgentInput = {
     .describe(
       'Optional client-supplied id ("bc-<uuid>") that makes this launch safe to retry: re-sending the same id returns the EXISTING agent instead of creating a duplicate. Cannot be combined with envVars.',
     ),
+  launchTimeoutMs: z
+    .number()
+    .int()
+    .min(5000)
+    .max(120000)
+    .optional()
+    .describe(
+      "How long to wait for the Cursor API's create call before returning a pending result. The create endpoint blocks until the first run is provisioned (often 60s+). Keep this below your MCP client's tool timeout. 5000-120000 ms, default 45000.",
+    ),
 };
 
 type LaunchAgentArgs = {
@@ -65,7 +97,38 @@ type LaunchAgentArgs = {
   mcpServers?: z.infer<typeof mcpServerInput>[];
   customSubagents?: z.infer<typeof customSubagentInput>[];
   agentId?: string;
+  launchTimeoutMs?: number;
 };
+
+/** Who chose the agent id: the caller, this server, or the Cursor API. */
+export type AgentIdSource = 'caller' | 'client' | 'server';
+
+/**
+ * Every launch gets an agentId up front when it can, so a create that outlives
+ * the MCP client's timeout is still recoverable: the id is in the pending
+ * result, `get_agent` finds it once the API catches up, and re-sending it turns
+ * a duplicate launch into a 409 agent_id_conflict this tool resolves.
+ *
+ * `envVars` is the one case where the API mints the id itself, so there is
+ * nothing to pre-assign; a generated `name` becomes the only handle on it.
+ */
+export function resolveLaunchIdentity(input: LaunchAgentArgs): {
+  agentId: string | undefined;
+  agentIdSource: AgentIdSource;
+  name: string | undefined;
+} {
+  if (input.agentId !== undefined) {
+    return { agentId: input.agentId, agentIdSource: 'caller', name: input.name };
+  }
+  if (input.envVars !== undefined) {
+    return {
+      agentId: undefined,
+      agentIdSource: 'server',
+      name: input.name ?? `mcp-launch-${randomUUID().slice(0, 8)}`,
+    };
+  }
+  return { agentId: `bc-${randomUUID()}`, agentIdSource: 'client', name: input.name };
+}
 
 export function buildLaunchAgentBody(input: LaunchAgentArgs): Record<string, unknown> {
   if (input.modelParams !== undefined && input.model === undefined) {
@@ -100,19 +163,82 @@ export function buildLaunchAgentBody(input: LaunchAgentArgs): Record<string, unk
   });
 }
 
+function pendingHint({ agentId, name }: { agentId: string | undefined; name: string | undefined }): string {
+  if (agentId !== undefined) {
+    return `The Cursor API is still creating this agent; the request continues in the background of this MCP server. Poll get_agent with agentId="${agentId}" about every 10s (it returns NotFoundError until the agent exists), then list_runs with that agentId to get the first runId, then get_run_events or wait_for_run. Do NOT launch again without an agentId — that would create a second billed agent; calling launch_agent again with agentId="${agentId}" is safe and returns this same agent.`;
+  }
+  return `The Cursor API is still creating this agent and \`envVars\` forces a server-minted agent id, so this server does not know the id yet. Call list_agents about every 10s and find the agent named "${
+    name ?? '(the name you passed)'
+  }", then list_runs with its id to get the first runId, then get_run_events or wait_for_run. Do NOT launch again — that would create a second billed agent. Drop \`envVars\` next time so a retry-safe agentId can be pre-assigned client-side.`;
+}
+
 export async function runLaunchAgent({
   client,
   input,
+  logger = silentLogger,
+  startTimer = defaultStartTimer,
 }: {
   client: CursorClient;
   input: LaunchAgentArgs;
+  logger?: Logger;
+  startTimer?: StartLaunchTimer;
 }): Promise<ToolData> {
-  const body = buildLaunchAgentBody(input);
+  const { agentId: launchAgentId, agentIdSource, name } = resolveLaunchIdentity(input);
+  const body = buildLaunchAgentBody({ ...input, agentId: launchAgentId, name });
+  const launchTimeoutMs = input.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS;
+
+  const inFlight = client.launchAgent(body);
+  // Attached before anything can await: if the timer wins the race below this
+  // promise outlives the tool call, and an unobserved rejection would otherwise
+  // reach process-level unhandledRejection handling.
+  inFlight
+    .then((created) => {
+      logger.info('launch_agent create finished', {
+        agentId: created.agent.id,
+        runId: created.run.id,
+        runStatus: created.run.status,
+      });
+    })
+    .catch((error: unknown) => {
+      logger.warn('launch_agent create failed', {
+        agentId: launchAgentId,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    });
+
+  // Cancelled on every exit path, so a create that answers in 300ms does not
+  // leave a 45s handle armed on the event loop.
+  let cancelTimer = (): void => {};
+  const timeout = new Promise<typeof LAUNCH_TIMED_OUT>((resolve) => {
+    const armed = startTimer({ ms: launchTimeoutMs, fire: () => resolve(LAUNCH_TIMED_OUT) });
+    cancelTimer = armed.cancel;
+  });
 
   try {
-    const { agent, run } = await client.launchAgent(body);
+    const outcome: CreateAgentResponse | typeof LAUNCH_TIMED_OUT = await Promise.race([
+      inFlight,
+      timeout,
+    ]);
+
+    if (outcome === LAUNCH_TIMED_OUT) {
+      return {
+        pending: true,
+        agentId: launchAgentId ?? null,
+        agentIdSource,
+        runId: null,
+        agentStatus: null,
+        runStatus: null,
+        ...(name === undefined ? {} : { name }),
+        launchTimeoutMs,
+        hint: pendingHint({ agentId: launchAgentId, name }),
+      };
+    }
+
+    const { agent, run } = outcome;
     return {
+      pending: false,
       agentId: agent.id,
+      agentIdSource,
       runId: run.id,
       agentStatus: agent.status,
       runStatus: run.status,
@@ -132,7 +258,9 @@ export async function runLaunchAgent({
     const runs = await client.listRuns({ agentId, limit: 1 });
     const run = runs.items[0];
     return {
+      pending: false,
       agentId: agent.id,
+      agentIdSource,
       runId: run?.id,
       agentStatus: agent.status,
       runStatus: run?.status,
@@ -146,16 +274,18 @@ export async function runLaunchAgent({
           ? 'An agent with this agentId already existed and has no runs yet. Use send_followup to give it work.'
           : `An agent with this agentId already existed — nothing new was launched. Its latest run is ${run.id} (${run.status}); follow it with get_run_events or wait_for_run.`,
     };
+  } finally {
+    cancelTimer();
   }
 }
 
-export function registerLaunchAgent({ server, client }: RegisterToolArgs): void {
+export function registerLaunchAgent({ server, client, logger }: RegisterToolArgs): void {
   server.registerTool(
     'launch_agent',
     {
       title: 'Launch a Cursor cloud agent',
       description:
-        'Creates a Cursor cloud agent and immediately starts its first run. Use this to hand a coding task to Cursor\'s cloud: it clones the repos you name, works autonomously, pushes a `cursor/*` branch and (with autoCreatePR) opens a PR. Returns agentId + runId right away — the run is asynchronous and begins in status CREATING.\n\nNEXT STEP after calling this: follow the run with get_run_events (pass afterEventId=nextEventId on each poll) or wait_for_run, then get_run for the final result text and PR URLs.\n\nNotes: omit BOTH `repos` and `env` for a cheap no-repo agent (good for prompt-only work). `mode:"plan"` produces a plan instead of changes. `envVars` is beta-gated and is SILENTLY IGNORED when the account does not have it — verify before relying on it. Pass a fixed `agentId` ("bc-<uuid>") to make the launch safe to retry: a duplicate id returns the existing agent with alreadyExisted:true instead of launching twice. This call is NEVER retried automatically, because a duplicate POST would launch a second agent.',
+        'Creates a Cursor cloud agent and starts its first run. Use this to hand a coding task to Cursor\'s cloud: it clones the repos you name, works autonomously, pushes a `cursor/*` branch and (with autoCreatePR) opens a PR.\n\nIMPORTANT — this call can be slow: Cursor\'s create endpoint blocks until the first run is provisioned and has been measured at 60s+ even for a trivial no-repo agent. If it has not answered within `launchTimeoutMs` (default 45s, deliberately under the MCP default 60s tool timeout) this tool returns a SUCCESS result with `pending: true` and the `agentId` it pre-assigned, while the create keeps running in the background. That is not a failure and the agent is NOT lost: follow the `hint` — poll get_agent with that agentId, then list_runs for the first runId. Never re-launch without passing that agentId; that bills a second agent.\n\nNEXT STEP on a normal (non-pending) result: follow the run with get_run_events (pass afterEventId=nextEventId on each poll) or wait_for_run, then get_run for the final result text and PR URLs.\n\nNotes: omit BOTH `repos` and `env` for a cheap no-repo agent (good for prompt-only work). `mode:"plan"` produces a plan instead of changes. `envVars` is beta-gated, is SILENTLY IGNORED when the account does not have it, and forces a server-minted agent id — so a launch that uses it cannot be pre-assigned an id and must be recovered by `name` via list_agents. Otherwise this server always sends a client-generated `agentId` ("bc-<uuid>", `agentIdSource: "client"`) so the launch is retry-safe: re-sending the same id returns the existing agent with alreadyExisted:true instead of launching twice. This call is NEVER retried automatically, because a duplicate POST would launch a second agent.',
       inputSchema: launchAgentInput,
       annotations: {
         readOnlyHint: false,
@@ -164,6 +294,6 @@ export function registerLaunchAgent({ server, client }: RegisterToolArgs): void 
         openWorldHint: true,
       },
     },
-    async (input) => withErrorHandling(() => runLaunchAgent({ client, input })),
+    async (input) => withErrorHandling(() => runLaunchAgent({ client, input, logger })),
   );
 }

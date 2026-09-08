@@ -9,9 +9,13 @@ import type { RunEvent } from '../client/sse.js';
 import type { Run } from '../client/types.js';
 import {
   extractPrUrls,
+  hasUnpublishedBranches,
   isTerminalRunStatus,
+  readRunResultText,
   unknownStatusWarning,
   withErrorHandling,
+  PLAN_ARTIFACT_HINT,
+  RESERVED_BRANCH_CAVEAT,
   type RegisterToolArgs,
   type ToolData,
 } from './shared.js';
@@ -192,7 +196,21 @@ export async function runWaitForRun({
   const warning = unknownStatusWarning(run.status);
   // `Run.result` is only populated once the run record is terminal; the stream's
   // `result` event carries the same text and often arrives first.
-  const resultText = run.result ?? streamResultText;
+  const resultText = readRunResultText(run) ?? streamResultText;
+  const elapsedSeconds = Math.round(elapsedMs / 1000);
+  const prPart = prUrls.length > 0 ? ` PR(s): ${prUrls.join(', ')}.` : '';
+  // A terminal run does not always produce `result` (a CANCELLED run has none),
+  // and this response omits the key entirely when it is missing — so the hint
+  // must not tell the model to read a field that is not in the payload.
+  const terminalHint = [
+    resultText === undefined
+      ? `Run ended with status ${run.status} after ${elapsedSeconds}s and produced no result text, so there is no \`result\` field in this response.${prPart}`
+      : `Run ended with status ${run.status} after ${elapsedSeconds}s.${prPart} \`result\` holds the final assistant reply.`,
+    hasUnpublishedBranches(run) ? RESERVED_BRANCH_CAVEAT : undefined,
+    run.status === 'FINISHED' ? PLAN_ARTIFACT_HINT : undefined,
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(' ');
 
   return {
     isTerminal,
@@ -208,10 +226,8 @@ export async function runWaitForRun({
     budgetExhausted: false,
     ...(warning === undefined ? {} : { warning }),
     hint: isTerminal
-      ? `Run ended with status ${run.status} after ${Math.round(elapsedMs / 1000)}s.${
-          prUrls.length > 0 ? ` PR(s): ${prUrls.join(', ')}.` : ''
-        } \`result\` holds the final assistant reply.`
-      : `Still running after ${Math.round(elapsedMs / 1000)}s; call wait_for_run again with afterEventId=${resume}. This is not an error.`,
+      ? terminalHint
+      : `Still running after ${elapsedSeconds}s; call wait_for_run again with afterEventId=${resume}. This is not an error.`,
   };
 }
 
@@ -221,7 +237,7 @@ export function registerWaitForRun({ server, client }: RegisterToolArgs): void {
     {
       title: 'Wait for a run to finish',
       description:
-        'Blocks until the run reaches a terminal status (FINISHED/ERROR/CANCELLED/EXPIRED) or maxWaitMs elapses (default 55s), then returns the final run snapshot, `result` text, PR URLs and how many events went by. Use this instead of get_run_events when you do not need to see intermediate output — it is far cheaper on the request budget than polling.\n\nHitting the deadline is NOT an error: you get isTerminal:false and a lastEventId. Call wait_for_run again with afterEventId=<lastEventId> to keep waiting. Cloud agent runs often take several minutes, so expect to call this a few times.',
+        'Blocks until the run reaches a terminal status (FINISHED/ERROR/CANCELLED/EXPIRED) or maxWaitMs elapses (default 55s), then returns the final run snapshot, `result` text (when the run produced any), PR URLs and how many events went by. Use this instead of get_run_events when you do not need to see intermediate output — it is far cheaper on the request budget than polling.\n\nHitting the deadline is NOT an error: you get isTerminal:false and a lastEventId. Call wait_for_run again with afterEventId=<lastEventId> to keep waiting. Cloud agent runs often take several minutes, so expect to call this a few times.\n\nReading the result: terminal status comes from the run record, not from a `done` event — some runs finish without emitting one. `git.branches` lists reserved/target branch names and is not proof of a push; only a `prUrl` confirms work was published. A plan-mode run stores its plan as an artifact (list_artifacts + download_artifact), not in `result`.',
       inputSchema: waitForRunInput,
       annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
     },

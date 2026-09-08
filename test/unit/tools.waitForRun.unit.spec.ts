@@ -170,6 +170,70 @@ describe('wait_for_run pacing and budget', () => {
     expect(router.calls[1]?.headers['last-event-id']).toBeUndefined();
   });
 
+  it('does not promise a `result` field on a terminal run that has none', async () => {
+    // Live repro: a CANCELLED run came back with no `result`, yet the hint said
+    // "`result` holds the final assistant reply" while the key was omitted.
+    const cancelled = { ...finishedRunFixture, status: 'CANCELLED' } as Record<string, unknown>;
+    delete cancelled['result'];
+    const text = ['event: status', `data: {"runId":"${RUN}","status":"CANCELLED"}`, '', ''].join('\n');
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text, stall: true })] },
+      { match: isRunGet, responses: [() => jsonResponse(cancelled)] },
+    ]);
+
+    const result = await runWaitForRun({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 5000 },
+      sleep: async () => undefined,
+    });
+
+    expect(result['isTerminal']).toBe(true);
+    expect(result['runStatus']).toBe('CANCELLED');
+    expect(result).not.toHaveProperty('result');
+    const hint = String(result['hint']);
+    expect(hint).toContain('status CANCELLED');
+    expect(hint).toContain('no result text');
+    expect(hint).not.toContain('holds the final assistant reply');
+  });
+
+  it('still points at `result` when the terminal run has one', async () => {
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text: SSE_TRANSCRIPT })] },
+      { match: isRunGet, responses: [() => jsonResponse(finishedRunFixture)] },
+    ]);
+    const result = await runWaitForRun({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 5000 },
+    });
+    const hint = String(result['hint']);
+    expect(hint).toContain('`result` holds the final assistant reply');
+    expect(hint).toContain('list_artifacts');
+    expect(hint).not.toContain('not proof of a push');
+  });
+
+  it('warns about reserved branches and stays quiet about plans on a cancelled run', async () => {
+    const cancelled = {
+      ...finishedRunFixture,
+      status: 'CANCELLED',
+      git: { branches: [{ repoUrl: 'github.com/your-org/your-repo', branch: 'cursor/mcp-live-da98' }] },
+    };
+    const text = ['event: status', `data: {"runId":"${RUN}","status":"CANCELLED"}`, '', ''].join('\n');
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text, stall: true })] },
+      { match: isRunGet, responses: [() => jsonResponse(cancelled)] },
+    ]);
+
+    const result = await runWaitForRun({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 5000 },
+      sleep: async () => undefined,
+    });
+
+    const hint = String(result['hint']);
+    expect(hint).toContain('not proof of a push');
+    expect(hint).not.toContain('list_artifacts');
+  });
+
   it('reports an exhausted local budget as "call again", not as a failure', async () => {
     const router = routerFetch([
       { match: isStream, responses: [() => sseResponse({ text: '' })] },

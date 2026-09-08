@@ -116,6 +116,16 @@ export class CursorClient {
     return url.toString();
   }
 
+  /**
+   * `/v1/agents?limit=5` — path and query only. Deliberately NEVER the headers
+   * (Authorization) or the body (prompts, envVars): this line is written to
+   * stderr on every request at debug level.
+   */
+  private logTarget(url: string): string {
+    const parsed = new URL(url);
+    return `${parsed.pathname}${parsed.search}`;
+  }
+
   private headers(extra?: Record<string, string>): Record<string, string> {
     return {
       Authorization: `Bearer ${this.apiKey}`,
@@ -141,12 +151,14 @@ export class CursorClient {
     context,
   }: RequestArgs<T>): Promise<T> {
     const url = this.buildUrl(path, query);
+    const target = this.logTarget(url);
     const canRetry = method === 'GET';
     let attempt = 0;
 
     for (;;) {
       attempt += 1;
       await this.rateLimiter.acquire(bucket);
+      const startedAt = this.now();
 
       let response: Response;
       try {
@@ -156,6 +168,10 @@ export class CursorClient {
           body: body === undefined ? undefined : JSON.stringify(body),
         });
       } catch (cause) {
+        const willRetry = canRetry && attempt < MAX_ATTEMPTS;
+        this.logger.debug(
+          `${method} ${target} -> network error (${this.now() - startedAt}ms)${willRetry ? ' retrying' : ''}`,
+        );
         const networkError = new NetworkError({
           message: `Could not reach the Cursor API (${method} ${path}): ${cause instanceof Error ? cause.message : String(cause)}`,
           guidance: canRetry
@@ -163,13 +179,22 @@ export class CursorClient {
             : 'Network failure on a write request, which is never retried automatically — the agent or run MAY still have been created. Call list_agents / list_runs to check before resending.',
           cause,
         });
-        if (canRetry && attempt < MAX_ATTEMPTS) {
+        if (willRetry) {
           this.logger.warn('retrying after network error', { attempt, method, path });
           await this.sleep(this.backoffMs(attempt, undefined));
           continue;
         }
         throw networkError;
       }
+
+      const elapsedMs = this.now() - startedAt;
+      const retryable = response.status === 429 || response.status >= 500;
+      const willRetry = canRetry && retryable && attempt < MAX_ATTEMPTS;
+      this.logger.debug(
+        `${method} ${target} -> ${response.status} (${elapsedMs}ms)${
+          response.status === 429 ? ' rate-limited' : ''
+        }${willRetry ? ' retrying' : ''}`,
+      );
 
       if (!response.ok) {
         const bodyText = await response.text().catch(() => '');
@@ -182,8 +207,7 @@ export class CursorClient {
           nowMs: this.now(),
           context,
         });
-        const retryable = response.status === 429 || response.status >= 500;
-        if (canRetry && retryable && attempt < MAX_ATTEMPTS) {
+        if (willRetry) {
           const retryAfterMs =
             'retryAfterMs' in error && typeof error.retryAfterMs === 'number'
               ? error.retryAfterMs
@@ -413,6 +437,11 @@ export class CursorClient {
     });
   }
 
+  /**
+   * Slow on purpose: Cursor mints the presigned URL on demand and this was
+   * measured at 37.7s live. No fetch timeout is set here (or anywhere in
+   * `request`) — do not add one below 60s.
+   */
   getArtifactDownloadUrl({
     agentId,
     path,
@@ -454,6 +483,7 @@ export class CursorClient {
   }): Promise<StreamRunEventsResult> {
     const path = `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`;
     const url = this.buildUrl(path);
+    const target = this.logTarget(url);
     const controller = new AbortController();
     const abortOuter = (): void => controller.abort();
     signal?.addEventListener('abort', abortOuter, { once: true });
@@ -464,6 +494,7 @@ export class CursorClient {
         attempt += 1;
         await this.rateLimiter.acquire('global');
 
+        const startedAt = this.now();
         let response: Response;
         try {
           response = await this.fetchImpl(url, {
@@ -476,6 +507,7 @@ export class CursorClient {
             signal: controller.signal,
           });
         } catch (cause) {
+          this.logger.debug(`GET ${target} -> network error (${this.now() - startedAt}ms)`);
           if (attempt < MAX_ATTEMPTS && !controller.signal.aborted) {
             await this.sleep(this.backoffMs(attempt, undefined));
             continue;
@@ -486,6 +518,13 @@ export class CursorClient {
             cause,
           });
         }
+
+        const retryableStatus = response.status === 429 || response.status >= 500;
+        this.logger.debug(
+          `GET ${target} -> ${response.status} (${this.now() - startedAt}ms)${
+            response.status === 429 ? ' rate-limited' : ''
+          }${retryableStatus && attempt < MAX_ATTEMPTS ? ' retrying' : ''}`,
+        );
 
         if (!response.ok) {
           const bodyText = await response.text().catch(() => '');
@@ -498,8 +537,7 @@ export class CursorClient {
             nowMs: this.now(),
             context: { agentId, runId },
           });
-          const retryable = response.status === 429 || response.status >= 500;
-          if (retryable && attempt < MAX_ATTEMPTS) {
+          if (retryableStatus && attempt < MAX_ATTEMPTS) {
             const retryAfterMs =
               'retryAfterMs' in error && typeof error.retryAfterMs === 'number'
                 ? error.retryAfterMs
