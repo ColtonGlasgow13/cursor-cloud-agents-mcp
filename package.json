@@ -1,0 +1,52 @@
+{
+  "name": "cursor-cloud-agents-mcp",
+  "version": "0.1.0",
+  "description": "MCP server (stdio) wrapping the Cursor Cloud Agents REST API v1 — launch cloud agents and monitor their runs from any MCP client.",
+  "license": "MIT",
+  "author": "Cole Glasgow",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "cursor-cloud-agents-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/ColtonGlasgow13/cursor-cloud-agents-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cursor",
+    "cloud-agents",
+    "agent"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('dist/cli.js',0o755)\"",
+    "prepare": "npm run build",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run test/unit test/contract",
+    "test:unit": "vitest run test/unit",
+    "test:contract": "vitest run test/contract",
+    "test:integration": "vitest run test/integration",
+    "smoke": "npm run build && node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "eventsource-parser": "^4.1.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "msw": "^2.15.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
