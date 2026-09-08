@@ -1,6 +1,7 @@
 import { createParser, type EventSourceMessage } from 'eventsource-parser';
 import type { Logger } from '../log.js';
 import { silentLogger } from '../log.js';
+import { TERMINAL_RUN_STATUSES } from './schemas.js';
 
 /**
  * Bounded drain of the run SSE stream.
@@ -50,6 +51,7 @@ export const STREAM_RETENTION_HEADER = 'x-cursor-stream-retention-seconds';
 
 /** `result`/`error` mean the run is over; we wait briefly for a trailing `done`. */
 const TERMINALISH_EVENT_TYPES = new Set(['result', 'error']);
+const TERMINAL_RUN_STATUS_SET = new Set<string>(TERMINAL_RUN_STATUSES);
 const TERMINAL_GRACE_MS = 500;
 
 export interface DrainRunEventStreamOptions {
@@ -121,6 +123,11 @@ export async function drainRunEventStream({
 
     if (type === 'status') {
       statusFromStream = readStatus(data) ?? statusFromStream;
+      if (statusFromStream !== null && TERMINAL_RUN_STATUS_SET.has(statusFromStream)) {
+        // The run was already over when we connected. Hold on only long enough
+        // for a trailing result/done instead of blocking for the whole window.
+        deadline = Math.min(deadline, now() + TERMINAL_GRACE_MS);
+      }
     } else if (type === 'result') {
       sawTerminal = true;
       statusFromStream = readStatus(data) ?? statusFromStream;

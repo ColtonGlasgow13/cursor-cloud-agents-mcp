@@ -133,3 +133,67 @@ describe('get_run_events', () => {
     expect(String(result['warning'])).toContain('HIBERNATED');
   });
 });
+
+describe('get_run_events terminal-status consistency', () => {
+  it('reports a terminal status from a framing event even when no `done` arrives', async () => {
+    // The run finished just before we connected: the sticky `status` event says
+    // FINISHED and then the stream goes quiet until maxWaitMs.
+    const text = [
+      'event: status',
+      `data: {"runId":"${RUN}","status":"FINISHED"}`,
+      '',
+      '',
+    ].join('\n');
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text, stall: true })] },
+      { match: isRunGet, responses: [() => jsonResponse(finishedRunFixture)] },
+    ]);
+
+    const result = await runGetRunEvents({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 300 },
+    });
+
+    expect(result['runStatus']).toBe('FINISHED');
+    // Previously this returned isTerminal:false with the hint "Not finished
+    // (status FINISHED). Sleep ~5s..." — an endless poll.
+    expect(result['isTerminal']).toBe(true);
+    expect(result['suggestedPollDelayMs']).toBe(0);
+    expect(String(result['hint'])).toContain('get_run');
+    expect(String(result['hint'])).not.toContain('Not finished');
+  });
+
+  it('never claims "finished" with a non-terminal status, and asks for exactly one snapshot', async () => {
+    // `done` arrives before the run record catches up: the snapshot still says
+    // RUNNING, so the answer must stay non-terminal AND stay consistent.
+    const text = ['id: d1', 'event: done', 'data: {}', '', ''].join('\n');
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text })] },
+      { match: isRunGet, responses: [() => jsonResponse(runningRunFixture)] },
+    ]);
+
+    const result = await runGetRunEvents({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 500 },
+    });
+
+    expect(router.countFor(isRunGet)).toBe(1);
+    expect(result['isTerminal']).toBe(false);
+    expect(result['runStatus']).toBe('RUNNING');
+    expect(String(result['hint'])).toContain('Not finished (status RUNNING)');
+    expect(String(result['hint'])).toContain('afterEventId="d1"');
+  });
+
+  it('spends no snapshot GET when the stream already reported a terminal result', async () => {
+    const router = routerFetch([
+      { match: isStream, responses: [() => sseResponse({ text: SSE_TRANSCRIPT })] },
+      { match: isRunGet, responses: [() => jsonResponse(finishedRunFixture)] },
+    ]);
+    const result = await runGetRunEvents({
+      client: makeClient({ fetch: router.fetch }),
+      input: { agentId: AGENT, runId: RUN, maxWaitMs: 1000 },
+    });
+    expect(result['isTerminal']).toBe(true);
+    expect(router.countFor(isRunGet)).toBe(0);
+  });
+});

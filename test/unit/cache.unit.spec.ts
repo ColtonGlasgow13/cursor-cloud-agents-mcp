@@ -49,3 +49,27 @@ describe('list_models caching', () => {
     expect(calls).toBe(3);
   });
 });
+
+describe('cache poisoning', () => {
+  useMswServer();
+
+  it('does not cache a failed request, and retries it on the next call', async () => {
+    let calls = 0;
+    mswServer.use(
+      http.get(`${BASE}/v1/models`, () => {
+        calls += 1;
+        if (calls <= 3) return HttpResponse.json({ error: { code: 'internal_error', message: 'boom' } }, { status: 500 });
+        return HttpResponse.json(modelsFixture);
+      }),
+    );
+    const client = makeClient({ rateLimitPerMin: 1000 });
+
+    await expect(client.listModels()).rejects.toThrow();
+    // 3 attempts for the failed GET; the failure left nothing behind.
+    expect(calls).toBe(3);
+
+    const models = await client.listModels();
+    expect(models.items[0]?.id).toBe('composer-2');
+    expect(calls).toBe(4);
+  });
+});

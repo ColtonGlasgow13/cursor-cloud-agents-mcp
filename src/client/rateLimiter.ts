@@ -100,16 +100,20 @@ export class RateLimiter {
    */
   async acquire(name: BucketName = 'global'): Promise<void> {
     const buckets = this.bucketsFor(name);
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    // Budget is cumulative across retries: a caller must never sit here for
+    // longer than maxWaitMs in total, however many times a concurrent acquire
+    // steals the token we were waiting for.
+    let remainingBudgetMs = this.maxWaitMs;
+    for (;;) {
       const waitMs = Math.max(0, ...buckets.map((bucket) => bucket.msUntilToken()));
       if (waitMs === 0) {
         for (const bucket of buckets) bucket.consume();
         return;
       }
-      if (waitMs > this.maxWaitMs) throw this.refuse(name, waitMs);
+      if (waitMs > remainingBudgetMs) throw this.refuse(name, waitMs);
+      remainingBudgetMs -= waitMs;
       await this.sleep(waitMs);
     }
-    throw this.refuse(name, this.maxWaitMs);
   }
 
   private refuse(name: BucketName, retryAfterMs: number): LocalRateLimitError {

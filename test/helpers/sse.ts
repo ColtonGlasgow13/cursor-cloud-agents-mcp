@@ -2,25 +2,43 @@ import { STREAM_RETENTION_HEADER } from '../../src/client/sse.js';
 import type { FetchLike } from '../../src/client/index.js';
 
 export interface SseResponseOptions {
-  /** Raw event-stream text. Written as one or more chunks. */
+  /** Raw event-stream text, written as a single chunk. */
   text?: string;
+  /**
+   * Raw event-stream text split into explicit chunks, so a test can cut an SSE
+   * line in half the way a real socket does.
+   */
+  chunks?: string[];
   /** Keep the stream open after the text instead of closing it. */
   stall?: boolean;
   retentionSeconds?: number;
   status?: number;
   body?: string;
   headers?: Record<string, string>;
+  /** Called when the consumer cancels the body (i.e. releases the socket). */
+  onCancel?: () => void;
 }
 
-export function sseBody({ text = '', stall = false }: { text?: string; stall?: boolean }): ReadableStream<Uint8Array> {
+export function sseBody({
+  text = '',
+  chunks,
+  stall = false,
+  onCancel,
+}: {
+  text?: string;
+  chunks?: string[];
+  stall?: boolean;
+  onCancel?: () => void;
+}): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  let sent = false;
+  const queue = chunks ?? (text === '' ? [] : [text]);
+  let index = 0;
   return new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (!sent) {
-        sent = true;
-        if (text !== '') controller.enqueue(encoder.encode(text));
-        if (!stall) controller.close();
+      const next = queue[index];
+      if (next !== undefined) {
+        index += 1;
+        controller.enqueue(encoder.encode(next));
         return undefined;
       }
       if (stall) {
@@ -29,6 +47,9 @@ export function sseBody({ text = '', stall = false }: { text?: string; stall?: b
       }
       controller.close();
       return undefined;
+    },
+    cancel() {
+      onCancel?.();
     },
   });
 }
@@ -41,19 +62,29 @@ export function sseResponse(options: SseResponseOptions = {}): Response {
       headers: { 'content-type': 'application/json', ...options.headers },
     });
   }
-  return new Response(sseBody({ text: options.text, stall: options.stall }), {
-    status,
-    headers: {
-      'content-type': 'text/event-stream',
-      [STREAM_RETENTION_HEADER]: String(options.retentionSeconds ?? 3600),
-      ...options.headers,
+  return new Response(
+    sseBody({
+      text: options.text,
+      chunks: options.chunks,
+      stall: options.stall,
+      onCancel: options.onCancel,
+    }),
+    {
+      status,
+      headers: {
+        'content-type': 'text/event-stream',
+        [STREAM_RETENTION_HEADER]: String(options.retentionSeconds ?? 3600),
+        ...options.headers,
+      },
     },
-  });
+  );
 }
 
 export interface RecordedRequest {
   url: string;
   headers: Record<string, string>;
+  /** The AbortSignal the client passed, so tests can assert it was aborted. */
+  signal: AbortSignal | undefined;
 }
 
 /** A fetch stub that records calls and replays queued responses. */
@@ -68,7 +99,7 @@ export function recordingFetch(responses: (() => Response)[]): {
     for (const [key, value] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
       headers[key.toLowerCase()] = value;
     }
-    calls.push({ url: String(input), headers });
+    calls.push({ url: String(input), headers, signal: init?.signal ?? undefined });
     const next = responses[Math.min(index, responses.length - 1)];
     index += 1;
     if (next === undefined) throw new Error('recordingFetch: no response queued');
@@ -96,7 +127,7 @@ export function routerFetch(routes: Route[]): {
     for (const [key, value] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
       headers[key.toLowerCase()] = value;
     }
-    calls.push({ url, headers });
+    calls.push({ url, headers, signal: init?.signal ?? undefined });
     const route = routes.find((candidate) => candidate.match(url));
     if (route === undefined) throw new Error(`routerFetch: no route for ${url}`);
     const index = indexes.get(route) ?? 0;

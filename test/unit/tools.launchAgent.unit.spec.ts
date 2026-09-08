@@ -73,6 +73,43 @@ describe('launch_agent behaviour', () => {
     expect(String(result['nextSteps'])).toContain('wait_for_run');
   });
 
+  it('puts no undefined or null keys on the wire (raw body string)', async () => {
+    let raw = '';
+    mswServer.use(
+      http.post(`${BASE}/v1/agents`, async ({ request }) => {
+        raw = await request.text();
+        return HttpResponse.json(createAgentFixture, { status: 201 });
+      }),
+    );
+
+    await runLaunchAgent({ client: makeClient(), input: { prompt: 'Add a README' } });
+
+    expect(raw).toBe('{"prompt":{"text":"Add a README"}}');
+    for (const key of ['repos', 'env', 'model', 'envVars', 'mcpServers', 'mode', 'agentId', 'images']) {
+      expect(raw, key).not.toContain(key);
+    }
+    expect(raw).not.toContain('null');
+  });
+
+  it('recovers when agent_id_conflict comes back as a 400 rather than a 409', async () => {
+    // The OpenAPI spec says 409, but Cursor's prose docs have also called this
+    // a 400. Either way the launch must resolve to the existing agent.
+    mswServer.use(
+      http.post(`${BASE}/v1/agents`, () =>
+        HttpResponse.json(errorBody('agent_id_conflict', 'already exists'), { status: 400 }),
+      ),
+      http.get(`${BASE}/v1/agents/${AGENT}`, () => HttpResponse.json(agentFixture)),
+      http.get(`${BASE}/v1/agents/${AGENT}/runs`, () => HttpResponse.json(listRunsFixture)),
+    );
+
+    const result = await runLaunchAgent({
+      client: makeClient(),
+      input: { prompt: 'Add a README', agentId: AGENT },
+    });
+    expect(result['alreadyExisted']).toBe(true);
+    expect(result['agentId']).toBe(AGENT);
+  });
+
   it('recovers from 409 agent_id_conflict by returning the existing agent', async () => {
     let creates = 0;
     mswServer.use(

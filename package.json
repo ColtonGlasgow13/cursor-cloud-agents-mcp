@@ -13,7 +13,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",
@@ -43,7 +44,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^26.5.0",
+    "@types/node": "^22.19.2",
     "msw": "^2.15.0",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",

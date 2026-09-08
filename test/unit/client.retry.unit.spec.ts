@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { RateLimitedError, ServerError } from '../../src/client/errors.js';
+import { RateLimitedError, ServerError, formatErrorForTool } from '../../src/client/errors.js';
 import { makeClient } from '../helpers/client.js';
 import { createAgentFixture, createRunFixture, errorBody, meUserFixture } from '../helpers/fixtures.js';
 import { BASE, mswServer, useMswServer } from '../helpers/mswServer.js';
@@ -51,6 +51,72 @@ describe('retry policy', () => {
     const client = makeClient({ sleep: async (ms) => void waits.push(ms) });
     await client.me();
     expect(waits).toEqual([30_000]);
+  });
+
+  it('reports the full Retry-After to the caller even though a single wait is capped', async () => {
+    mswServer.use(
+      http.post(`${BASE}/v1/agents`, () =>
+        HttpResponse.json(errorBody('rate_limit_exceeded', 'slow down'), {
+          status: 429,
+          headers: { 'Retry-After': '600' },
+        }),
+      ),
+    );
+    const error = await makeClient()
+      .launchAgent({ prompt: { text: 'x' } })
+      .catch((e: unknown) => e);
+    // Capping this at 30s would tell the model to retry ten minutes early.
+    expect((error as RateLimitedError).retryAfterMs).toBe(600_000);
+    expect(formatErrorForTool(error)).toContain('600s');
+  });
+
+  it('parses an HTTP-date Retry-After', async () => {
+    const now = Date.parse('2026-04-13T18:30:00.000Z');
+    mswServer.use(
+      http.post(`${BASE}/v1/agents`, () =>
+        HttpResponse.json(errorBody('rate_limit_exceeded', 'slow down'), {
+          status: 429,
+          headers: { 'Retry-After': 'Mon, 13 Apr 2026 18:30:45 GMT' },
+        }),
+      ),
+    );
+    const error = await makeClient({ now: () => now })
+      .launchAgent({ prompt: { text: 'x' } })
+      .catch((e: unknown) => e);
+    expect((error as RateLimitedError).retryAfterMs).toBe(45_000);
+  });
+
+  it('never puts the API key or request headers into error details', async () => {
+    mswServer.use(
+      http.post(`${BASE}/v1/agents`, () =>
+        HttpResponse.json(errorBody('rate_limit_exceeded', 'slow down'), {
+          status: 429,
+          headers: { 'Retry-After': '7', 'X-RateLimit-Remaining': '0' },
+        }),
+      ),
+    );
+    const error = await makeClient()
+      .launchAgent({ prompt: { text: 'x' } })
+      .catch((e: unknown) => e);
+    const serialized = JSON.stringify({
+      details: (error as RateLimitedError).details,
+      text: formatErrorForTool(error),
+    });
+    expect(serialized).not.toContain('crsr_test_key');
+    expect(serialized.toLowerCase()).not.toContain('authorization');
+    // The rate-limit RESPONSE headers are still surfaced for diagnosis.
+    expect(serialized).toContain('"remaining":"0"');
+  });
+
+  it('applies exponential backoff with full jitter between GET retries', async () => {
+    const waits: number[] = [];
+    mswServer.use(
+      http.get(`${BASE}/v1/me`, () => HttpResponse.json(errorBody('internal_error', 'boom'), { status: 500 })),
+    );
+    const client = makeClient({ sleep: async (ms) => void waits.push(ms), random: () => 0.5 });
+    await expect(client.me()).rejects.toBeInstanceOf(ServerError);
+    // base 500ms doubling, halved by the stubbed jitter: 500*0.5, 1000*0.5.
+    expect(waits).toEqual([250, 500]);
   });
 
   it('does NOT retry a 429 on a write and surfaces retryAfterMs', async () => {

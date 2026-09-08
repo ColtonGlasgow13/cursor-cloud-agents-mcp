@@ -48,20 +48,25 @@ export function parseErrorBody(bodyText: string): ParsedErrorBody {
   return { code, message, helpUrl, provider, raw };
 }
 
-const RETRY_AFTER_CAP_MS = 30_000;
-
-/** `Retry-After` is either delta-seconds or an HTTP-date. */
+/**
+ * `Retry-After` is either delta-seconds or an HTTP-date.
+ *
+ * The value is returned verbatim (never capped): it is what the caller is told
+ * to wait. Capping belongs at the sleep site, where a single automatic backoff
+ * is limited to 30s — clamping here would tell a model "wait 30s" when the API
+ * asked for ten minutes.
+ */
 export function parseRetryAfterMs(headerValue: string | null, nowMs: number): number | undefined {
   if (headerValue === null) return undefined;
   const trimmed = headerValue.trim();
   if (trimmed === '') return undefined;
   const seconds = Number(trimmed);
   if (Number.isFinite(seconds)) {
-    return Math.max(0, Math.min(seconds * 1000, RETRY_AFTER_CAP_MS));
+    return Math.max(0, seconds * 1000);
   }
   const dateMs = Date.parse(trimmed);
   if (Number.isNaN(dateMs)) return undefined;
-  return Math.max(0, Math.min(dateMs - nowMs, RETRY_AFTER_CAP_MS));
+  return Math.max(0, dateMs - nowMs);
 }
 
 export function readRequestId(headers: Headers): string | undefined {
@@ -150,7 +155,10 @@ export function mapHttpError({
     });
   }
 
-  if (status === 409) {
+  // `agent_id_conflict` is a 409 per the OpenAPI spec, but Cursor's prose docs
+  // have also described it as a 400. Key off the code as well as the status so
+  // launch_agent's "same agentId is safe to retry" promise holds either way.
+  if (status === 409 || code === 'agent_id_conflict') {
     if (code === 'agent_busy') {
       const agentId = context.agentId;
       const activeRunId = readActiveRunId(body.raw);

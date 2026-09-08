@@ -75,11 +75,18 @@ export async function runGetRunEvents({
     });
 
     let runStatus = stream.statusFromStream;
-    let isTerminal = stream.sawTerminal;
+    // `isTerminal` is always derived from `runStatus` so the two can never
+    // disagree in the response (a "not finished, status FINISHED" hint would
+    // send the caller into an endless poll). A leading `status` event can
+    // report a terminal status with no `done` ever following, and conversely a
+    // `done` can arrive before the run record catches up.
+    let isTerminal = isTerminalRunStatus(runStatus);
     let snapshot: Awaited<ReturnType<CursorClient['getRun']>> | undefined;
 
-    // One cheap GET when the stream did not tell us where the run stands.
-    if (runStatus === null || (!stream.sawTerminal && stream.closedByServer)) {
+    // Exactly one cheap GET when the stream did not leave a consistent status:
+    // it never reported one, or it ended (done/result, or the socket closed)
+    // while the status we hold is still non-terminal.
+    if (runStatus === null || ((stream.sawTerminal || stream.closedByServer) && !isTerminal)) {
       snapshot = await client.getRun({ agentId, runId });
       runStatus = snapshot.status;
       isTerminal = isTerminalRunStatus(runStatus);

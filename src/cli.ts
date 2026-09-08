@@ -60,6 +60,16 @@ async function serve(): Promise<void> {
   const server = createServer({ client });
   const transport = new StdioServerTransport();
 
+  // A stray rejection must never take the transport down mid-conversation.
+  // Tool handlers are wrapped, but the SDK, the transport and Node's fetch can
+  // all reject asynchronously; log to stderr (never stdout) and keep serving.
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error('unhandled promise rejection (ignored)', reason);
+  });
+  process.on('uncaughtException', (error: Error) => {
+    logger.error('uncaught exception (ignored)', error);
+  });
+
   let closing = false;
   const shutdown = (signal: string): void => {
     if (closing) return;

@@ -542,6 +542,10 @@ export class CursorClient {
       }
     } finally {
       signal?.removeEventListener('abort', abortOuter);
+      // Belt and braces: the drain aborts through `onStop`, but every other way
+      // out of this method (an error response, a bodyless 200, a throw) must
+      // also release the socket instead of leaving the request in flight.
+      controller.abort();
     }
   }
 }

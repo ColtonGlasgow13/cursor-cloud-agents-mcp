@@ -1,0 +1,9 @@
+# Not a workspace declaration — pnpm 11 keeps its build-script decisions here.
+# Without them `pnpm install --frozen-lockfile` exits 1 ("Ignored build scripts")
+# on a clean checkout, which fails CI at its first step.
+#   esbuild (via vitest/tsx) — allowed: it links the platform binary.
+#   msw — declined: its postinstall only sets up the browser service worker.
+# npm ignores this file entirely, so `npx -y github:...` installs are unaffected.
+allowBuilds:
+  esbuild: true
+  msw: false

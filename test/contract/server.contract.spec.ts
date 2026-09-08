@@ -57,6 +57,26 @@ describe('stdio MCP server contract', () => {
     }
   });
 
+  it('publishes a real JSON Schema for every tool input (zod shape -> schema)', async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    const deleteAgent = byName.get('delete_agent');
+    expect(deleteAgent?.inputSchema.type).toBe('object');
+    expect(Object.keys(deleteAgent?.inputSchema.properties ?? {}).sort()).toEqual(['agentId', 'confirm']);
+    expect(deleteAgent?.inputSchema.required).toContain('confirm');
+
+    const launch = byName.get('launch_agent');
+    const launchProps = launch?.inputSchema.properties as Record<string, unknown> | undefined;
+    expect(launchProps?.['prompt']).toBeDefined();
+    expect(launchProps?.['repos']).toBeDefined();
+    expect(launch?.inputSchema.required).toEqual(['prompt']);
+
+    // Optional inputs must not be advertised as required, or clients refuse to call.
+    const getRunEvents = byName.get('get_run_events');
+    expect(getRunEvents?.inputSchema.required).toEqual(['agentId', 'runId']);
+  });
+
   it('calls whoami and returns the fixture as text and structured content', async () => {
     const result = await client.callTool({ name: 'whoami', arguments: {} });
     expect(result.isError).toBeFalsy();

@@ -24,8 +24,9 @@ time (which is why no `dist/` is committed). **The first launch takes roughly 20
 dev dependencies and runs `tsc`; later launches are fast.
 
 Because the repo is private, the machine needs GitHub access (an SSH key on `github.com`, or a token in the git
-credential helper). The `github:` shorthand uses whatever git credentials are already configured. If it fails to
-resolve, use the explicit SSH form instead — swap it into any snippet below:
+credential helper). The `github:` shorthand uses whatever git credentials are already configured and is verified
+to work against this private repo. If it fails to resolve on your machine, use the explicit SSH form instead —
+swap it into any snippet below:
 
 ```
 git+ssh://git@github.com/ColtonGlasgow13/cursor-cloud-agents-mcp.git
@@ -157,7 +158,7 @@ The whole point of the server is that this loop is spelled out for the model in 
 2. `get_run_events` with those ids and no `afterEventId`.
 3. If `isTerminal` is false: sleep `suggestedPollDelayMs` (≈5s), then call `get_run_events` again with
    `afterEventId = nextEventId`. Repeat.
-4. When `isTerminal` is true: `get_run` for `result` (the final assistant reply) and `prUrls`.
+4. When `isTerminal` is true: `get_run` for `run.result` (the final assistant reply) and `prUrls`.
 
 **Blocking (you only want the answer):**
 
@@ -168,8 +169,8 @@ The whole point of the server is that this loop is spelled out for the model in 
 **Rate-limit budget.** Cursor's documented default is ~20 requests/minute per user, and this server enforces the
 same budget locally so you fail fast instead of collecting 429s. Every stream open and every snapshot is one
 request. Polling `get_run_events` every 5s costs 12 requests/minute — most of your budget for one run. Prefer
-`wait_for_run` (one request per 20s window) when you do not need intermediate output, and never poll two runs at
-5s intervals at once. `list_repositories` is far stricter (1/minute, 30/hour) and is cached for 10 minutes; this
+`wait_for_run` (one stream open per 20s window plus one final `get_run`) when you do not need intermediate
+output, and never poll two runs at 5s intervals at once. `list_repositories` is far stricter (1/minute, 30/hour) and is cached for 10 minutes; this
 server refuses extra calls locally rather than burning the server-side allowance.
 
 If the local budget is exhausted, tools return `LocalRateLimitError` with a "try again in Ns" message and **no
@@ -227,6 +228,10 @@ pnpm build
 pnpm smoke            # build, boot dist/cli.js, print the tool list
 ```
 
+`pnpm-workspace.yaml` is not a workspace declaration: it is where pnpm 11 keeps its build-script decisions
+(allow `esbuild`, decline msw's browser-only postinstall). Without it `pnpm install --frozen-lockfile` exits 1 on
+a clean checkout. npm ignores the file, so installs from git are unaffected.
+
 Integration tests hit the real API and are skipped unless both variables are set:
 
 ```bash
@@ -236,9 +241,11 @@ RUN_INTEGRATION=1 CURSOR_API_KEY=crsr_... pnpm test:integration
 They launch a no-repo agent with a trivial prompt, poll it to a terminal status, and delete it in a `finally`.
 
 **Release notes.** `files` ships only `dist/`, `README.md` and `LICENSE`; `dist/` is gitignored. The `prepare`
-script runs `pnpm build`, and npm runs `prepare` (with devDependencies installed) for git dependencies — that is
-what makes `npx -y github:...` work without a committed build. Bump `version` in `package.json` and tag the
-commit so installs can pin `#vX.Y.Z`.
+script runs `npm run build` (npm, not pnpm — npm is what actually runs it during a git install), and npm runs
+`prepare` with devDependencies installed for git dependencies — that is what makes `npx -y github:...` work
+without a committed build. Verified end to end: a cold `npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp
+--version` on a machine with GitHub SSH access takes ~26s and prints the version. Bump `version` in
+`package.json` and tag the commit so installs can pin `#vX.Y.Z` (the tag has to exist first).
 
 ## Out of scope
 

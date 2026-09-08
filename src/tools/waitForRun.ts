@@ -5,6 +5,8 @@ import {
   StreamExpiredError,
 } from '../client/errors.js';
 import type { CursorClient } from '../client/index.js';
+import type { RunEvent } from '../client/sse.js';
+import type { Run } from '../client/types.js';
 import {
   extractPrUrls,
   isTerminalRunStatus,
@@ -18,6 +20,42 @@ export const DEFAULT_WAIT_MS = 55_000;
 /** One MCP tool call re-opens the stream in windows this long. */
 export const STREAM_WINDOW_MS = 20_000;
 const MIN_USEFUL_WINDOW_MS = 500;
+/**
+ * Floor on how long one stream window + probe may take before the next one
+ * opens. Cursor may close the stream immediately (e.g. while the run is still
+ * CREATING); this keeps that from becoming a request-burning spin loop.
+ */
+const MIN_WINDOW_SPACING_MS = 5000;
+
+/** `result` event data is `{ runId, status, text?, durationMs?, git? }`. */
+function readResultText(events: RunEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event === undefined || event.type !== 'result') continue;
+    const { data } = event;
+    if (typeof data === 'object' && data !== null && 'text' in data) {
+      const { text } = data as { text: unknown };
+      if (typeof text === 'string' && text !== '') return text;
+    }
+  }
+  return undefined;
+}
+
+async function pauseBetweenWindows({
+  now,
+  sleep,
+  deadline,
+  windowStartedAt,
+}: {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  deadline: number;
+  windowStartedAt: number;
+}): Promise<void> {
+  const spent = now() - windowStartedAt;
+  const pauseMs = Math.min(MIN_WINDOW_SPACING_MS - spent, deadline - now());
+  if (pauseMs > 0) await sleep(pauseMs);
+}
 
 export const waitForRunInput = {
   agentId: z.string().min(1).describe('Agent id, e.g. "bc-<uuid>".'),
@@ -46,10 +84,12 @@ export async function runWaitForRun({
   client,
   input,
   now = Date.now,
+  sleep = (ms) => new Promise<void>((resolve) => void setTimeout(resolve, ms)),
 }: {
   client: CursorClient;
   input: WaitForRunArgs;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }): Promise<ToolData> {
   const { agentId, runId } = input;
   const maxWaitMs = input.maxWaitMs ?? DEFAULT_WAIT_MS;
@@ -61,10 +101,15 @@ export async function runWaitForRun({
   let sawTerminal = false;
   let streamExpired = false;
   let cursorInvalid = false;
+  let cursorDropped = false;
+  let streamResultText: string | undefined;
+  /** Set when a probe already read a terminal snapshot, so we do not re-GET it. */
+  let terminalSnapshot: Run | undefined;
 
   while (!sawTerminal) {
     const remaining = deadline - now();
     if (remaining < MIN_USEFUL_WINDOW_MS) break;
+    const windowStartedAt = now();
     try {
       const stream = await client.streamRunEvents({
         agentId,
@@ -75,13 +120,23 @@ export async function runWaitForRun({
       });
       eventCount += stream.events.length;
       lastEventId = stream.lastEventId ?? lastEventId;
-      if (stream.sawTerminal) {
+      streamResultText = readResultText(stream.events) ?? streamResultText;
+      // A `result`/`done` event, or any framing event reporting a terminal
+      // status, means there is nothing left to wait for.
+      if (stream.sawTerminal || isTerminalRunStatus(stream.statusFromStream)) {
         sawTerminal = true;
         break;
       }
       if (stream.closedByServer) {
         const probe = await client.getRun({ agentId, runId });
-        if (isTerminalRunStatus(probe.status)) break;
+        if (isTerminalRunStatus(probe.status)) {
+          terminalSnapshot = probe;
+          break;
+        }
+        // The server hung up on a live run. Without pacing, a stream that
+        // closes instantly would re-open in a tight loop and spend the whole
+        // ~20/min budget in a second.
+        await pauseBetweenWindows({ now, sleep, deadline, windowStartedAt });
       }
     } catch (error) {
       if (error instanceof StreamExpiredError) {
@@ -93,9 +148,11 @@ export async function runWaitForRun({
         // snapshot instead of failing the whole call.
         break;
       }
-      if (error instanceof InvalidEventCursorError) {
-        // Drop the bad cursor and replay from the start of the retained window.
+      if (error instanceof InvalidEventCursorError && !cursorDropped) {
+        // Drop the bad cursor once and replay from the start of the retained
+        // window. Retrying more than once would just loop on the same 400.
         cursorInvalid = true;
+        cursorDropped = true;
         lastEventId = null;
         continue;
       }
@@ -103,31 +160,58 @@ export async function runWaitForRun({
     }
   }
 
-  const run = await client.getRun({ agentId, runId });
-  const isTerminal = isTerminalRunStatus(run.status);
+  let run: Run | undefined = terminalSnapshot;
+  try {
+    run = run ?? (await client.getRun({ agentId, runId }));
+  } catch (error) {
+    // The local budget ran out while waiting. That is not a failure of the
+    // wait: report what we know and tell the caller exactly how to resume.
+    if (!(error instanceof LocalRateLimitError)) throw error;
+  }
+
   const elapsedMs = now() - startedAt;
+  const resume = lastEventId === null ? '(omit it)' : `"${lastEventId}"`;
+
+  if (run === undefined) {
+    return {
+      isTerminal: false,
+      runStatus: null,
+      prUrls: [],
+      eventCount,
+      lastEventId,
+      elapsedMs,
+      streamExpired,
+      cursorInvalid,
+      budgetExhausted: true,
+      hint: `The local request budget (CURSOR_MCP_RATE_LIMIT_PER_MIN) ran out before the run finished, so its final status could not be read. Wait ~60s, then call wait_for_run again with afterEventId=${resume}. Nothing failed on Cursor's side.`,
+    };
+  }
+
+  const isTerminal = isTerminalRunStatus(run.status);
   const prUrls = extractPrUrls(run);
   const warning = unknownStatusWarning(run.status);
+  // `Run.result` is only populated once the run record is terminal; the stream's
+  // `result` event carries the same text and often arrives first.
+  const resultText = run.result ?? streamResultText;
 
   return {
     isTerminal,
     runStatus: run.status,
     run,
     prUrls,
-    ...(run.result === undefined ? {} : { result: run.result }),
+    ...(resultText === undefined ? {} : { result: resultText }),
     eventCount,
     lastEventId,
     elapsedMs,
     streamExpired,
     cursorInvalid,
+    budgetExhausted: false,
     ...(warning === undefined ? {} : { warning }),
     hint: isTerminal
       ? `Run ended with status ${run.status} after ${Math.round(elapsedMs / 1000)}s.${
           prUrls.length > 0 ? ` PR(s): ${prUrls.join(', ')}.` : ''
         } \`result\` holds the final assistant reply.`
-      : `Still running after ${Math.round(elapsedMs / 1000)}s; call wait_for_run again with afterEventId=${
-          lastEventId === null ? '(omit it)' : `"${lastEventId}"`
-        }. This is not an error.`,
+      : `Still running after ${Math.round(elapsedMs / 1000)}s; call wait_for_run again with afterEventId=${resume}. This is not an error.`,
   };
 }
 

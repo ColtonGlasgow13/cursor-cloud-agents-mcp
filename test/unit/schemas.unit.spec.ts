@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { ResponseValidationError } from '../../src/client/errors.js';
+import { ResponseValidationError, formatErrorForTool } from '../../src/client/errors.js';
 import { agentSchema, runSchema } from '../../src/client/schemas.js';
 import { makeClient } from '../helpers/client.js';
 import { agentFixture, finishedRunFixture, meServiceAccountFixture } from '../helpers/fixtures.js';
@@ -49,6 +49,11 @@ describe('ResponseValidationError', () => {
     expect(validation.issues.join(' ')).toContain('agentId');
     expect(validation.rawBody).toEqual(broken);
     expect(validation.message).toContain('/v1/agents');
+    // The zod issues have to reach the model, not just the error object.
+    const text = formatErrorForTool(validation);
+    expect(text).toContain('ResponseValidationError');
+    expect(text).toContain('Schema issues');
+    expect(text).toContain('agentId');
   });
 
   it('throws when the body is not JSON at all', async () => {

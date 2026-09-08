@@ -5,7 +5,9 @@ MCP (stdio) server wrapping the Cursor Cloud Agents REST API v1.
 ## Commands
 
 ```bash
-pnpm install          # dev setup (pnpm 11, Node >= 22)
+pnpm install          # dev setup (pnpm 11, Node >= 22); build-script decisions
+                      # live in pnpm-workspace.yaml (allowBuilds), without which
+                      # pnpm 11 exits 1 on a clean checkout
 pnpm typecheck        # tsc --noEmit
 pnpm test:unit        # msw-backed unit tests
 pnpm test:contract    # spawns the real CLI over stdio and drives it with the MCP SDK client
