@@ -1,6 +1,6 @@
 # cursor-cloud-agents-mcp
 
-This repository provides an installable Model Context Protocol (MCP) stdio server for Cursor Agent. After you add it to Cursor, Cursor Agent can invoke 18 tools that launch and manage Cursor Cloud Agents through the [Cursor Cloud Agents REST API v1](https://cursor.com/docs/cloud-agent/api/overview).
+This repository provides an installable Model Context Protocol (MCP) server that any MCP-compatible agent or client with local stdio support can use to launch and manage Cursor Cloud Agents. It exposes 18 tools through the [Cursor Cloud Agents REST API v1](https://cursor.com/docs/cloud-agent/api/overview).
 
 Your MCP client starts the server as a local process. The package is not installed automatically inside the cloud agents' virtual machines.
 
