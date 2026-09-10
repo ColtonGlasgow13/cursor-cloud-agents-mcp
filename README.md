@@ -31,27 +31,50 @@ The [Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints) accept
 - A user API key from your personal Cursor account. Create one at [cursor.com/dashboard/api](https://cursor.com/dashboard/api).
 - A service account API key. [Service accounts](https://cursor.com/docs/account/enterprise/service-accounts) are available on Enterprise. A Cursor admin creates one under **Dashboard > Settings > API Keys > Service Accounts > New Service Account** and must copy the generated key immediately. For the service account to use repositories, the team also needs a team-level Cursor GitHub app integration.
 
-Pass either key unchanged as `CURSOR_API_KEY`. This must be a Cursor API key, not a GitHub token or a model-provider key. In every example below, replace `<YOUR_CURSOR_API_KEY>` with that key.
-
-The server reads the environment variables passed to its process. It does not load `.env` files automatically, so set the key in the MCP client configuration below.
+Pass either key unchanged as `CURSOR_API_KEY`. This must be a Cursor API key, not a GitHub token or a model-provider key. In every example below, replace `<YOUR_CURSOR_API_KEY>` with that key. The environment-file setup is recommended; [direct environment configuration](#pass-cursor_api_key-directly) is also supported.
 
 ## 2. Configure your MCP client
 
-`print-config` prints configuration to stdout. It changes no files and needs no API key:
+Create a dedicated private environment file before registering the server. These commands preserve an existing file:
 
 ```bash
-npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp print-config cursor
-# cursor | claude-code | codex | windsurf | vscode | json
+mkdir -p "$HOME/.config/cursor-cloud-agents-mcp"
+touch "$HOME/.config/cursor-cloud-agents-mcp/.env"
+chmod 600 "$HOME/.config/cursor-cloud-agents-mcp/.env"
+${EDITOR:-vi} "$HOME/.config/cursor-cloud-agents-mcp/.env"
 ```
 
-Without a `--key` argument, the output retains `<YOUR_CURSOR_API_KEY>`. Replace that placeholder before saving or enabling the server. Some formats include comments or a Cursor install deeplink around the configuration, so do not paste the entire output into a JSON file without selecting the JSON object.
+Add the key to the file:
 
-In every client configuration, replace `<YOUR_CURSOR_API_KEY>`, including the angle brackets, while keeping the surrounding quotes. Do this before saving or enabling the server. Merge the server into an existing configuration without replacing other server entries. Prefer a personal or user-level configuration for a durable key, and do not commit a project configuration containing the key.
+```dotenv
+CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>'
+```
+
+The server uses Node's native `.env` parser. It does not expand shell expressions such as `$HOME` or `${OTHER_VARIABLE}` inside the file, so enter literal values.
+
+The key is stored as plaintext. On POSIX systems, `chmod 600` restricts the file to its owner. Keep the file out of Git and protect it like any other credential.
+
+`print-config` prints configuration to stdout. It changes no files and does not read the environment file:
+
+```bash
+npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp print-config claude-code --env-file-path "$HOME/.config/cursor-cloud-agents-mcp/.env"
+# claude-code | codex | cursor | vscode | windsurf | json
+```
+
+If you omit `--env-file-path`, generated snippets retain `<ABSOLUTE_PATH_TO_ENV_FILE>`. Replace that placeholder with an absolute path before saving or enabling the server. Do not use `~` in JSON or TOML because those formats do not expand it. Some generated formats include comments or a Cursor install deeplink around the configuration, so select the configuration itself rather than pasting the entire output into a JSON file.
+
+Print the absolute path to copy into JSON or TOML:
+
+```bash
+printf '%s\n' "$HOME/.config/cursor-cloud-agents-mcp/.env"
+```
+
+Merge the server into an existing client configuration without replacing other server entries. Remove any old `CURSOR_API_KEY` value from the client's `env` block when switching to `--env-file-path`; a process environment value takes precedence over the file, even when it is empty.
 
 ### Claude Code
 
 ```bash
-claude mcp add cursor-cloud-agents --env CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp
+claude mcp add cursor-cloud-agents -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp --env-file-path "$HOME/.config/cursor-cloud-agents-mcp/.env"
 ```
 
 Add `--scope user` to make the server available in every project. For slow launches, set this server's `timeout` in `.mcp.json` to `180000` milliseconds, or start Claude Code with `MCP_TOOL_TIMEOUT=180000`. Both timeout settings are documented in the [Claude Code MCP guide](https://code.claude.com/docs/en/mcp).
@@ -59,7 +82,7 @@ Add `--scope user` to make the server available in every project. For slow launc
 ### Codex CLI
 
 ```bash
-codex mcp add cursor-cloud-agents --env CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp
+codex mcp add cursor-cloud-agents -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp --env-file-path "$HOME/.config/cursor-cloud-agents-mcp/.env"
 ```
 
 After running that command, add `tool_timeout_sec = 180` to the existing `[mcp_servers.cursor-cloud-agents]` table in `~/.codex/config.toml`.
@@ -69,11 +92,8 @@ You can configure the same server by hand instead:
 ```toml
 [mcp_servers.cursor-cloud-agents]
 command = "npx"
-args = ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"]
+args = ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp", "--env-file-path", "<ABSOLUTE_PATH_TO_ENV_FILE>"]
 tool_timeout_sec = 180
-
-[mcp_servers.cursor-cloud-agents.env]
-CURSOR_API_KEY = "<YOUR_CURSOR_API_KEY>"
 ```
 
 Use either the add command and its existing entry or the manual TOML block. Do not append a second table with the same name. The [Codex MCP documentation](https://developers.openai.com/codex/mcp) covers these settings.
@@ -94,10 +114,7 @@ Add this server under `mcpServers` in `~/.cursor/mcp.json`:
     "cursor-cloud-agents": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"],
-      "env": {
-        "CURSOR_API_KEY": "<YOUR_CURSOR_API_KEY>"
-      }
+      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp", "--env-file-path", "<ABSOLUTE_PATH_TO_ENV_FILE>"]
     }
   }
 }
@@ -117,6 +134,83 @@ Add this to the project's `.vscode/mcp.json`. VS Code uses a top-level `servers`
     "cursor-cloud-agents": {
       "type": "stdio",
       "command": "npx",
+      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp", "--env-file-path", "<ABSOLUTE_PATH_TO_ENV_FILE>"]
+    }
+  }
+}
+```
+
+For user-level configuration, run **MCP: Open User Configuration** from the Command Palette and add the same server under `servers`. See [VS Code's MCP server documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers) for details.
+
+### Windsurf
+
+Add this entry under `mcpServers` in `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "cursor-cloud-agents": {
+      "command": "npx",
+      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp", "--env-file-path", "<ABSOLUTE_PATH_TO_ENV_FILE>"]
+    }
+  }
+}
+```
+
+The path and wrapper object follow the [Windsurf MCP documentation](https://docs.windsurf.com/windsurf/cascade/mcp).
+
+### Pass `CURSOR_API_KEY` directly
+
+Direct process environment values are fully supported. Use this route instead of the `--env-file-path` entries above. When migrating an existing registration, remove its `--env-file-path` arguments and update that server rather than registering a second `cursor-cloud-agents` server. A direct value takes precedence if both methods are present, even when the direct value is empty.
+
+Client configurations store direct values as plaintext. Use a private user-level file, keep it out of Git, and restart or re-enable the server after changing it.
+
+`print-config --key` produces inline-key output:
+
+```bash
+npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp print-config claude-code --key '<YOUR_CURSOR_API_KEY>'
+```
+
+Passing a real key on the command line can leave it in shell history. The environment-file method avoids that exposure.
+
+#### Claude Code with a direct key
+
+```bash
+claude mcp add cursor-cloud-agents --env CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp
+```
+
+This stores the key in the Claude Code MCP registration. Add `--scope user` to make the registration available in every project.
+
+#### Codex CLI with a direct key
+
+```bash
+codex mcp add cursor-cloud-agents --env CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp
+```
+
+After running that command, add `tool_timeout_sec = 180` to the existing `[mcp_servers.cursor-cloud-agents]` table.
+
+For a complete manual `~/.codex/config.toml` entry, use this instead of the add command:
+
+```toml
+[mcp_servers.cursor-cloud-agents]
+command = "npx"
+args = ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"]
+tool_timeout_sec = 180
+
+[mcp_servers.cursor-cloud-agents.env]
+CURSOR_API_KEY = "<YOUR_CURSOR_API_KEY>"
+```
+
+#### Cursor with a direct key
+
+Merge this server under `mcpServers` in `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cursor-cloud-agents": {
+      "type": "stdio",
+      "command": "npx",
       "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"],
       "env": {
         "CURSOR_API_KEY": "<YOUR_CURSOR_API_KEY>"
@@ -126,11 +220,30 @@ Add this to the project's `.vscode/mcp.json`. VS Code uses a top-level `servers`
 }
 ```
 
-Do not commit this project file with a real key. See [VS Code's MCP server documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers) for user-level and input-variable alternatives.
+#### VS Code with a direct key
 
-### Windsurf
+Merge this server under the top-level `servers` object in `.vscode/mcp.json`:
 
-Add this entry under `mcpServers` in `~/.codeium/windsurf/mcp_config.json`:
+```json
+{
+  "servers": {
+    "cursor-cloud-agents": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"],
+      "env": {
+        "CURSOR_API_KEY": "<YOUR_CURSOR_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+This project file contains the plaintext key, so keep it out of Git. For user-level configuration, run **MCP: Open User Configuration** from the VS Code Command Palette and place the same server under `servers`.
+
+#### Windsurf with a direct key
+
+Merge this server under `mcpServers` in `~/.codeium/windsurf/mcp_config.json`:
 
 ```json
 {
@@ -146,19 +259,23 @@ Add this entry under `mcpServers` in `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
-The path and wrapper object follow the [Windsurf MCP documentation](https://docs.windsurf.com/windsurf/cascade/mcp).
-
 ## 3. Verify the key without changing cloud agents
 
 After saving the configuration, enable or restart the server in your MCP client. Confirm that the client shows 18 tools, then ask it to call only the `cursor-cloud-agents` `whoami` tool. That read-only call returns the identity associated with the key.
 
-You can also run `doctor` from a terminal. The environment assignment applies only to this command:
+Run `doctor` with the environment file:
+
+```bash
+npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp doctor --env-file-path "$HOME/.config/cursor-cloud-agents-mcp/.env"
+```
+
+Or pass the key directly for this command:
 
 ```bash
 CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp doctor
 ```
 
-Success exits with code 0 and prints JSON containing `"ok": true` plus the Cursor identity. `doctor` checks the terminal environment; it does not read your MCP client's configuration. It calls the identity endpoint and does not create, update, or delete an agent.
+Success exits with code 0 and prints JSON containing `"ok": true` plus the Cursor identity. `doctor` resolves values from the selected file and process environment as applicable; it does not read your MCP client's configuration. It calls the identity endpoint and does not create, update, or delete an agent.
 
 ## Configuration
 
@@ -168,13 +285,25 @@ Success exits with code 0 and prints JSON containing `"ok": true` plus the Curso
 | `CURSOR_API_BASE` | no | `https://api.cursor.com` | API base URL override |
 | `CURSOR_MCP_LOG_LEVEL` | no | `warn` | `silent`, `error`, `warn`, `info`, or `debug`; stderr only |
 
-The server reads the environment variables passed to its process. It does not load `.env` files automatically. `.env.example` documents the variables, but copying it to `.env` does not configure the server unless another tool loads that file into the process environment.
+For the default server command, `serve`, and `doctor`, the server chooses at most one file. An explicit `--env-file-path PATH` replaces the current-working-directory default and must exist; the server does not merge or fall back to `.env`. Without that flag, it reads `.env` from the current working directory when the file exists.
 
-If the server reports that `CURSOR_API_KEY` is missing, check the key setting in the failing MCP client's configuration, save it, and restart or re-enable the server. For `doctor`, set the key in the terminal command as shown above.
+Values already present in the process environment then override values from the chosen file. This applies even when a process variable is an empty string. An empty or stale `CURSOR_API_KEY` passed by a client therefore shadows the file and can cause a missing-key or authentication error. Remove the old client `env` entry, save the configuration, and restart or re-enable the server.
+
+The server uses only `CURSOR_API_KEY`, `CURSOR_API_BASE`, and `CURSOR_MCP_LOG_LEVEL` from the file. Node's native parser does not perform shell expansion. `--help`, `--version`, and `print-config` do not read an environment file.
+
+A source checkout can use the included template:
+
+```bash
+if [ ! -e .env ]; then cp .env.example .env; fi
+chmod 600 .env
+${EDITOR:-vi} .env
+```
+
+In the editor, replace `<YOUR_CURSOR_API_KEY>` with your key before running the server or `doctor`.
+
+The default server command and `doctor` load this `.env` automatically when they run from the checkout. The repository's `.gitignore` excludes `.env`; keep that rule in place.
 
 ## API behavior
-
-The wrapper stays close to Cursor's API:
 
 - Basic endpoint tools return Cursor's complete JSON response, including unknown fields.
 - `launch_agent` awaits one `POST /v1/agents` response. It does not retry, generate identity fields, or recover conflicts with extra requests.

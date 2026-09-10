@@ -27,7 +27,7 @@ export function loadConfig(env: EnvLike): Config {
   const apiKey = env['CURSOR_API_KEY']?.trim() ?? '';
   if (apiKey === '') {
     throw new ConfigError(
-      'CURSOR_API_KEY is not set. Create a key at https://cursor.com/dashboard/api and pass it to the MCP server (e.g. `claude mcp add cursor-cloud-agents --env CURSOR_API_KEY=... -- npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp`). Run `cursor-cloud-agents-mcp print-config <harness>` for a ready-to-paste snippet.',
+      'CURSOR_API_KEY is not set. Set it directly, add it to .env, or pass --env-file-path PATH. Create a key at https://cursor.com/dashboard/api. Run `cursor-cloud-agents-mcp print-config <harness>` for a ready-to-paste snippet.',
     );
   }
 

@@ -27,6 +27,8 @@ describe('loadConfig', () => {
     })();
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).message).toContain('CURSOR_API_KEY');
+    expect((error as ConfigError).message).toContain('.env');
+    expect((error as ConfigError).message).toContain('--env-file-path');
     expect((error as ConfigError).message).toContain('print-config');
   });
 
