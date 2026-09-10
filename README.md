@@ -9,7 +9,7 @@ Your MCP client starts the server as a local process. The package is not install
 - Node.js 22 or newer
 - npm and `npx`
 - Git, plus GitHub access for the package source
-- Cursor for the setup below, or another supported MCP client
+- An MCP-compatible agent or client with local stdio support
 - A Cursor API key
 
 This repository is private during prelaunch. Configure GitHub authentication on the machine so `npx` can fetch it. The package source remains:
@@ -35,52 +35,7 @@ Pass either key unchanged as `CURSOR_API_KEY`. This must be a Cursor API key, no
 
 The server reads the environment variables passed to its process. It does not load `.env` files automatically, so set the key in the MCP client configuration below.
 
-## 2. Configure Cursor
-
-Create the personal MCP configuration directory if needed:
-
-```bash
-mkdir -p ~/.cursor
-```
-
-Add this server under `mcpServers` in `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cursor-cloud-agents": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"],
-      "env": {
-        "CURSOR_API_KEY": "<YOUR_CURSOR_API_KEY>"
-      }
-    }
-  }
-}
-```
-
-Replace `<YOUR_CURSOR_API_KEY>`, including the angle brackets, with your key while keeping the JSON quotes. Do this before saving or enabling the server. If the file already contains other `mcpServers`, merge the `cursor-cloud-agents` entry into that object instead of replacing the file.
-
-The personal file keeps the key out of a project checkout. You can use `.cursor/mcp.json` for project configuration, but do not commit a file that contains the key.
-
-Open **Customize** in the Cursor sidebar and enable `cursor-cloud-agents`. Cursor starts the local process; you do not need to run the server in a separate terminal. Confirm that Cursor shows 18 tools, then ask it to call only the `cursor-cloud-agents` `whoami` tool. That read-only call returns the identity associated with the key. See [Cursor's MCP setup guide](https://cursor.com/docs/mcp) for the current interface.
-
-`launch_agent` can take more than a minute because it waits for Cursor's full create-agent response. Cursor does not document a per-server tool-timeout key. If your installed Cursor version exposes a tool timeout, allow at least 180 seconds.
-
-## 3. Verify the key without changing cloud agents
-
-Run `doctor` from a terminal. The environment assignment applies only to this command:
-
-```bash
-CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp doctor
-```
-
-Success exits with code 0 and prints JSON containing `"ok": true` plus the Cursor identity. `doctor` checks the terminal environment; it does not read `~/.cursor/mcp.json`. It calls the identity endpoint and does not create, update, or delete an agent.
-
-## Other MCP clients
-
-### Generate a configuration snippet
+## 2. Configure your MCP client
 
 `print-config` prints configuration to stdout. It changes no files and needs no API key:
 
@@ -90,6 +45,8 @@ npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp print-config cursor
 ```
 
 Without a `--key` argument, the output retains `<YOUR_CURSOR_API_KEY>`. Replace that placeholder before saving or enabling the server. Some formats include comments or a Cursor install deeplink around the configuration, so do not paste the entire output into a JSON file without selecting the JSON object.
+
+In every client configuration, replace `<YOUR_CURSOR_API_KEY>`, including the angle brackets, while keeping the surrounding quotes. Do this before saving or enabling the server. Merge the server into an existing configuration without replacing other server entries. Prefer a personal or user-level configuration for a durable key, and do not commit a project configuration containing the key.
 
 ### Claude Code
 
@@ -120,6 +77,35 @@ CURSOR_API_KEY = "<YOUR_CURSOR_API_KEY>"
 ```
 
 Use either the add command and its existing entry or the manual TOML block. Do not append a second table with the same name. The [Codex MCP documentation](https://developers.openai.com/codex/mcp) covers these settings.
+
+### Cursor
+
+Create the personal MCP configuration directory if needed:
+
+```bash
+mkdir -p ~/.cursor
+```
+
+Add this server under `mcpServers` in `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cursor-cloud-agents": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "github:ColtonGlasgow13/cursor-cloud-agents-mcp"],
+      "env": {
+        "CURSOR_API_KEY": "<YOUR_CURSOR_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+You can use `.cursor/mcp.json` for project configuration. Open **Customize** in the Cursor sidebar and enable `cursor-cloud-agents`. Cursor starts the local process; you do not need to run the server in a separate terminal. See [Cursor's MCP setup guide](https://cursor.com/docs/mcp) for the current interface.
+
+`launch_agent` can take more than a minute because it waits for Cursor's full create-agent response. Cursor does not document a per-server tool-timeout key. If your installed Cursor version exposes a tool timeout, allow at least 180 seconds.
 
 ### VS Code
 
@@ -162,6 +148,18 @@ Add this entry under `mcpServers` in `~/.codeium/windsurf/mcp_config.json`:
 
 The path and wrapper object follow the [Windsurf MCP documentation](https://docs.windsurf.com/windsurf/cascade/mcp).
 
+## 3. Verify the key without changing cloud agents
+
+After saving the configuration, enable or restart the server in your MCP client. Confirm that the client shows 18 tools, then ask it to call only the `cursor-cloud-agents` `whoami` tool. That read-only call returns the identity associated with the key.
+
+You can also run `doctor` from a terminal. The environment assignment applies only to this command:
+
+```bash
+CURSOR_API_KEY='<YOUR_CURSOR_API_KEY>' npx -y github:ColtonGlasgow13/cursor-cloud-agents-mcp doctor
+```
+
+Success exits with code 0 and prints JSON containing `"ok": true` plus the Cursor identity. `doctor` checks the terminal environment; it does not read your MCP client's configuration. It calls the identity endpoint and does not create, update, or delete an agent.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |
@@ -172,7 +170,7 @@ The path and wrapper object follow the [Windsurf MCP documentation](https://docs
 
 The server reads the environment variables passed to its process. It does not load `.env` files automatically. `.env.example` documents the variables, but copying it to `.env` does not configure the server unless another tool loads that file into the process environment.
 
-If the server reports that `CURSOR_API_KEY` is missing, check where the failing process gets its environment. For Cursor, check the `env` object in `mcp.json`, save it, and restart or re-enable the server. For `doctor`, set the key in the terminal command as shown above.
+If the server reports that `CURSOR_API_KEY` is missing, check the key setting in the failing MCP client's configuration, save it, and restart or re-enable the server. For `doctor`, set the key in the terminal command as shown above.
 
 ## API behavior
 
